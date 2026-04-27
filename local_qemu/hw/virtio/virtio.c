@@ -4252,6 +4252,13 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
     virtio_bus_release_ioeventfd(vbus);
 }
 
+void virtio_device_set_remote_virtio(Object *obj, bool value, Error **errp)
+{
+    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
+    vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
+    // TODO: check stop and assign
+}
+
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
 {
     /* Set the default value here. */
@@ -4264,6 +4271,8 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, virtio_properties);
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
+    object_class_property_add_bool(vdc, "remote-virtio",
+                                   NULL, virtio_device_set_remote_virtio);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }

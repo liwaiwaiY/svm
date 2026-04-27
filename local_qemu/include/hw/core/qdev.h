@@ -444,6 +444,9 @@ compat_props_add(GPtrArray *arr,
  * Return: a derived DeviceState object with a reference count of 1.
  */
 DeviceState *qdev_new(const char *name);
+// cmsvm
+// remote version
+DeviceState *remote_qdev_new(const char* name, const char* ip_port)
 
 /**
  * qdev_try_new: Try to create a device on the heap

@@ -144,6 +144,28 @@ bool qdev_set_parent_bus(DeviceState *dev, BusState *bus, Error **errp)
     return true;
 }
 
+DeviceState *remote_qdev_new(const char* name, const char* ip_port)
+{
+    // TODO: change name policy
+    // cmsvm
+    // version1: let cmd to decide the device source
+    const char remote[] = "-remote";
+    char* qname;
+    // minus "-remote"(7)
+    int len = strlen(name) - 7;
+    qname = malloc(len + 1);
+    memcpy(qname, name, len);
+    if (qname == NULL)
+        return NULL;
+    qname[len] = '\0';
+    DeviceState* dev = DEVICE(object_new(qname));
+    free(qname);
+    object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp);
+    // TODO
+    object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp)
+    return dev;
+}
+
 DeviceState *qdev_new(const char *name)
 {
     return DEVICE(object_new(name));

@@ -645,7 +645,9 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    const char *driver, *path;
+    // cmsvm version1:
+    // if user config option "--remote xxxx.xxxx.xxxx.xxxx:xxxx", we decide it as a remote dev
+    const char *driver, *path, *remote;
     char *id;
     DeviceState *dev;
     BusState *bus = NULL;
@@ -656,6 +658,8 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         error_setg(errp, QERR_MISSING_PARAMETER, "driver");
         return NULL;
     }
+
+    remote = qdict_get_try_str(opts, "ipport");
 
     /* find driver */
     dc = qdev_get_device_class(&driver, errp);
@@ -698,7 +702,11 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     }
 
     /* create device */
-    dev = qdev_new(driver);
+    if (unlike(remote)) {
+        dev = remote_qdev_new(driver, remote);
+    } else {
+        dev = qdev_new(driver);
+    }
 
     /* Check whether the hotplug is allowed by the machine */
     if (phase_check(PHASE_MACHINE_READY) &&
