@@ -16,6 +16,7 @@ add_test_setup('thorough',
                env: ['G_TEST_SLOW=1', 'SPEED=thorough', 'RUST_BACKTRACE=1'])
 
 meson.add_postconf_script(find_program('scripts/symlink-install-tree.py'))
+meson.add_postconf_script(find_program('scripts/symlink-svm.py'))
 
 ####################
 # Global variables #

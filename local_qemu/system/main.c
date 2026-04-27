@@ -68,7 +68,14 @@ int (*qemu_main)(void) = os_darwin_cfrunloop_main;
 
 int main(int argc, char **argv)
 {
-    qemu_init(argc, argv);
+    // cmsvm: consume the first argv to test mode "local_qemu" or "remote_stub"
+    if (!strcmp(argv[0], "remote_stub"))
+        // cmsvmtodo2
+        qemu_init_remote_stub(argc, argv);
+    else
+        qemu_init(argc, argv);
+
+    // qemu_init(argc, argv);
 
     /*
      * qemu_init acquires the BQL and replay mutex lock. BQL is acquired when
