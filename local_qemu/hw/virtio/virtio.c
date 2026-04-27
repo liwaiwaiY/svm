@@ -4252,11 +4252,23 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
     virtio_bus_release_ioeventfd(vbus);
 }
 
+// cmsvm
 void virtio_device_set_remote_virtio(Object *obj, bool value, Error **errp)
 {
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
     vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
-    // TODO: check stop and assign
+    vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
+}
+
+
+// set string, value is target str (ip-prot: xxxx.xxxx.xxxx.xxxx@xxxx)
+// directly call virtio-remote to open socket. As qemu_create_cli_devices is the last init function, we regard it as not cost much
+// Also this property is set after all objects are initialized, we know which vq is activated
+// so we commend at version 1 to config remote virtio option for last cmd params
+// cmsvm
+void virtio_device_set_remote_machine(Object *obj, const char *value, Error **errp)
+{
+    init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, Error **errp);
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
@@ -4271,8 +4283,11 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, virtio_properties);
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
+    // cmsvm
     object_class_property_add_bool(vdc, "remote-virtio",
                                    NULL, virtio_device_set_remote_virtio);
+    object_class_property_add_str(vdc, "remote-machine",
+                                  NULL, virtio_device_set_remote_machine)
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }

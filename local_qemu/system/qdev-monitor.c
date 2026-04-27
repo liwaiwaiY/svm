@@ -646,7 +646,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     ERRP_GUARD();
     DeviceClass *dc;
     // cmsvm version1:
-    // if user config option "--remote xxxx.xxxx.xxxx.xxxx:xxxx", we decide it as a remote dev
+    // if user config option "--remote xxxx.xxxx.xxxx.xxxx@xxxx", we decide it as a remote dev
     const char *driver, *path, *remote;
     char *id;
     DeviceState *dev;
@@ -659,7 +659,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
-    remote = qdict_get_try_str(opts, "ipport");
+    remote = qdict_get_try_str(opts, "remote");
 
     /* find driver */
     dc = qdev_get_device_class(&driver, errp);
@@ -701,12 +701,14 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
+    // cmsvm v1: we leave socket connection into realize, as this is a part of device plug
+    // if (unlike(remote)) {
+    //     dev = remote_qdev_new(driver, remote);
+    // } else {
+    //     dev = qdev_new(driver);
+    // }
     /* create device */
-    if (unlike(remote)) {
-        dev = remote_qdev_new(driver, remote);
-    } else {
-        dev = qdev_new(driver);
-    }
+    dev = qdev_new(driver);
 
     /* Check whether the hotplug is allowed by the machine */
     if (phase_check(PHASE_MACHINE_READY) &&
@@ -736,9 +738,21 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         goto err_del_dev;
     }
 
-    if (!qdev_realize(dev, bus, errp)) {
-        goto err_del_dev;
+    // if (!qdev_realize(dev, bus, errp)) {
+    //     goto err_del_dev;
+    // }
+
+    // cmsvm v1.1
+    if (unlikely(remote)) {
+        if (!remote_qdev_realize(dev, bus, remote, errp)) {
+            goto err_del_dev;
+        }
+    } else {
+        if (!qdev_realize(dev, bus, errp)) {
+            goto err_del_dev;
+        }
     }
+
     return dev;
 
 err_del_dev:

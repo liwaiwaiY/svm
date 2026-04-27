@@ -48,10 +48,12 @@
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 
 // each vq has a socket, but the resp must be in the same vq with req
-// <K:name, V:socket*>
+// <K:vdev->name, V:socket*> for sender
 GHashTable *gsi_stubs = NULL;
-// <K:elem->index, V:elemt>
-GHashTable *gsi_elems = NULL;
+// <K:vdev->name, V:GHashTable*> for listener
+GHashTable *gsi_tables = NULL;
+// <K:elem->index, V:elemt> for listener/recver; need to find in gsi_tables
+// GHashTable *gsi_elems = NULL;
 
 extern VirtQueueElement* virtqueue_split_pop(VirtQueue* vq, size_t sz);
 extern VirtQueueElement* virtqueue_packed_pop(VirtQueue* vq, size_t sz);
@@ -75,24 +77,106 @@ int remote_uring_init(void)
     return 0;
 }
 
+// socket reconnect
+int reconnect_tcp_socket(int fd)
+{
+    // cmsvmTODO v2
+    return 0;
+}
+
 // enalbe socket aliveness in kernel
 int enable_tcp_keepalive(int fd)
 {
+    // need kernel to keep socket alive (this will not effect cqe&sqe)
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
+    // set idle limit (seconds)
     int keep_idle = 30;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
+    // set options for heartbeat packet (seconds)
     int keep_intvl = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof(keep_intvl));
+    // set options for retring (seconds)
     int keep_cnt = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof(keep_cnt));
     return 0;
 }
-
-// socket reconnect
-int reconnect_tcp_socket(int fd)
+    
+// cmsvmTODO v2: try decrease the memory region here, maybe flexible array
+void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
 {
-    return 0;
+    // spli ip and port form "ip_port"(xxxx.xxxx.xxxx.xxxx@xxxx)
+    char ip[64];
+    int port;
+    char *at_pos = strchr(ip_port, '@');
+    if (at_pos == NULL) {
+        return err;
+    }
+    int ip_len = at_pos - ip_port;
+    strncpy(ip, ip_port, ip_len);
+    ip[ip_len] = '\0';
+    *port = atoi(at_pos + 1);
+
+    // alloc sockets
+    SOCKET_RV *stubs = malloc(sizeof(SOCKET_RV) * VIRTIO_QUEUE_MAX);
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)){
+            stubs[n] = -1;
+            continue;
+        }
+        VirtQueue *vq = &vdev->vq[n];
+        stubs[n] = socket(AF_INET, SOCK_STREAM, 0);
+        if (stubs[n] < 0) {
+            goto erro;
+        }
+        struct sockaddr_in serv_addr;
+        memset(&serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port   = htons(PORT);
+        if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
+        {
+            close(sock_fd);
+            goto erro;
+        }
+        if (connect(sock_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
+        {
+            close(sock_fd);
+            goto erro;
+        }
+        enable_tcp_keepalive(stubs[n]);
+    }
+
+    if (!gsi_stubs)
+        gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
+    if (!gsi_tables)
+        gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    g_hash_table_insert(gsi_stubs, vdev->name, stubs);
+
+    return;
+
+goto erro;
+    // write errp
+    return;
+}
+
+void remote_device_clean_up_hash_table(VirtIODevice *vdev)
+{
+    // gsi_stubs
+    g_hash_table_remove(gsi_stubs, vdev->name);
+    // gsi_elems
+    g_hash_table_destroy(g_hash_table_lookup(gsi_tables, vdev->name));
+    // gsi_tables
+    g_hash_table_remove(gsi_tables, vdev->name);
+}
+
+void close_remote_virtio_device_sockets(VirtIODevice *vdev)
+{
+    SOCKET_RV *stubs = g_hash_table_lookup(gsi_stubs, vdev->name);
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (stubs[n] >= 0)
+            close(stubs[n]);
+    }
 }
 
 /* device usage don't need recover desc meta
@@ -121,11 +205,14 @@ void resp_listener(ListenerParam* param)
     int read_cnt, phase;
     VirtQueueElement *elem;
     char* buf;
+    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vq->vdev->name);
+    if (gsi_elems) {
+        goto hash_err;
+    }
 
     while (sending) {
 listen_begin:
         phase = 0;
-        // TODO: if link down, this may cause error
         pthread_mutex_lock(&rw_lock);
         while (sending && (recved >= sent)) {
             pthread_cond_wait(&rw_cond, &rw_lock);
@@ -171,11 +258,11 @@ listen_len:
         }
         len = (resp_len[0] << 24) | (resp_len[1] << 16) | (resp_len[2] << 8) | resp_len[3];
 
-        // todo
         elem = g_hash_table_lookup(gsi_elems, GINT_TO_POINTER(index));
         if (!elem)
             goto elem_err;
 
+        // cmsvmtodo: maybe more efficient way?
         // version1: move socket data to userspace buffer, then recover as sg_table
         buf = (char*)malloc(len);
         read_cnt = 0;
@@ -205,10 +292,14 @@ listen_data:
 
     return;
 
+// cmsvmtodo: error handling
+hash_err:
+    return;
 link_err:
     if (!reconnect_tcp_socket(param->stub) && buf) {
         // reconnect failing
         free(buf);
+        return;
     };
     switch (phase) {
     case 0:
@@ -232,6 +323,7 @@ void route_to_remote(VirtQueue *vq, SOCKET_RV stub)
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
+    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vq->vdev->name);
 
     if (virtio_device_disabled(vq->vdev)) {
         return 0;
@@ -302,7 +394,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         sending = false;
         pthread_cond_signal(&rw_cond);
         // wait listener exit
-         qemu_thread_join(&resp_thread);
+        qemu_thread_join(&resp_thread);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
@@ -321,17 +413,19 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
     }
 }
 
-static int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
+int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
 {
-    if (!gsi_elems)
-        gsi_elems = g_hash_table_new(g_direct_hash, g_direct_equal);
-    if (!gsi_stubs)
-        gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
+    if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
+        // vdev impl first time
+        GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
+        g_hash_table_insert(gsi_tables, vdev->name, ptr);
+    }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
 
-    // TODO: need to create tcp scoket and user heatbeat to keep alive
+    // cmsvm version1: sockets are created in initialization phase
+    // cmsvmTODO v2: lazy binding at ept violation, i.e. here or pci_common_write
     memory_region_transaction_begin();
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
         VirtQueue *vq = &vdev->vq[n];
@@ -384,4 +478,42 @@ assign_error:
         virtio_bus_cleanup_host_notifier(qbus, i);
     }
     return err;
+}
+
+void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
+{
+    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    int n, r;
+
+    /*
+     * Batch all the host notifiers in a single transaction to avoid
+     * quadratic time complexity in address_space_update_ioeventfds().
+     */
+    memory_region_transaction_begin();
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        VirtQueue *vq = &vdev->vq[n];
+
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        event_notifier_set_handler(&vq->host_notifier, NULL);
+        r = virtio_bus_set_host_notifier(qbus, n, false);
+        assert(r >= 0);
+    }
+    /*
+     * The transaction expects the ioeventfds to be open when it
+     * commits. Do it now, before the cleanup loop.
+     */
+    memory_region_transaction_commit();
+
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        virtio_bus_cleanup_host_notifier(qbus, n);
+    }
+
+    // need to close sockets
+    close_remote_virtio_device_sockets(vdev);
+    remote_device_clean_up_hash_table(vdev);
 }

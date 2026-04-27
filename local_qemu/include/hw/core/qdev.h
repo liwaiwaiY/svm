@@ -490,6 +490,8 @@ static inline bool qdev_is_realized(DeviceState *dev)
  * Return: true on success, else false setting @errp with error
  */
 bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp);
+// cmsvm
+bool remote_qdev_realize(DeviceState *dev, BusState *bus, Error **errp);
 
 /**
  * qdev_realize_and_unref: Realize @dev and drop a reference

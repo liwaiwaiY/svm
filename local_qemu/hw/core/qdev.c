@@ -146,22 +146,9 @@ bool qdev_set_parent_bus(DeviceState *dev, BusState *bus, Error **errp)
 
 DeviceState *remote_qdev_new(const char* name, const char* ip_port)
 {
-    // TODO: change name policy
     // cmsvm
-    // version1: let cmd to decide the device source
-    const char remote[] = "-remote";
-    char* qname;
-    // minus "-remote"(7)
-    int len = strlen(name) - 7;
-    qname = malloc(len + 1);
-    memcpy(qname, name, len);
-    if (qname == NULL)
-        return NULL;
-    qname[len] = '\0';
     DeviceState* dev = DEVICE(object_new(qname));
-    free(qname);
     object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp);
-    // TODO
     object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp)
     return dev;
 }
@@ -296,6 +283,29 @@ bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
     }
 
     return object_property_set_bool(OBJECT(dev), "realized", true, errp);
+}
+
+// cmsvm v1.1
+bool remote_qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
+{
+    assert(!dev->realized && !dev->parent_bus);
+
+    if (bus) {
+        if (!qdev_set_parent_bus(dev, bus, errp)) {
+            return false;
+        }
+    } else {
+        assert(!DEVICE_GET_CLASS(dev)->bus_type);
+    }
+
+    if(!object_property_set_bool(OBJECT(dev), "realized", true, errp))
+        return false;
+    // return of object_property_set_xxx is determined by errp
+    if(!object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp))
+        return false;
+    if(!object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp))
+        return false;
+    return true;
 }
 
 bool qdev_realize_and_unref(DeviceState *dev, BusState *bus, Error **errp)

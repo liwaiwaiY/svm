@@ -2342,6 +2342,7 @@ static void virtio_pci_realize(PCIDevice *pci_dev, Error **errp)
 
     virtio_pci_bus_new(&proxy->bus, sizeof(proxy->bus), proxy);
     if (k->realize) {
+        // realize首先调用dc->realize，但被重定向到virtio-pci-realize，这儿被设置为qdev-realize
         k->realize(proxy, errp);
     }
 }
