@@ -41,6 +41,9 @@
                                 (0x1ULL << VIRTIO_F_ANY_LAYOUT))
 
 struct VirtQueue;
+// cmsvm
+struct RemoteVirtQueue;
+struct RemoteVirtQueueStub;
 
 static inline hwaddr vring_align(hwaddr addr,
                                              unsigned long align)

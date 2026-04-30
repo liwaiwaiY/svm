@@ -44,15 +44,16 @@
 #include <sys/uio.h>
 #include <poll.h>
 #include <liburing.h>
+#include <fcntl.h>
 
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 
-// each vq has a socket, but the resp must be in the same vq with req
-// <K:vdev->name, V:socket*> for sender
+// each vdev has one TCP socket to remote stub
+// <K:vdev->name, V:SOCKET_RV*>
 GHashTable *gsi_stubs = NULL;
-// <K:vdev->name, V:GHashTable*> for listener
+// <K:vdev->name, V:GHashTable*>
 GHashTable *gsi_tables = NULL;
-// <K:elem->index, V:elemt> for listener/recver; need to find in gsi_tables
+// <K:(vq_nr<<16)|index, V:elemt>; need to find first in gsi_tables
 // GHashTable *gsi_elems = NULL;
 
 extern VirtQueueElement* virtqueue_split_pop(VirtQueue* vq, size_t sz);
@@ -65,14 +66,35 @@ static pthread_cond_t   rw_cond;
 static int sent, recved;
 static bool sending = false;
 
+static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
+{
+    if (vq_nr < 0 || vq_nr >= VIRTIO_QUEUE_MAX) {
+        return NULL;
+    }
+    return &vdev->vq[vq_nr];
+}
+
+static gpointer make_elem_key(int vq_nr, unsigned int index)
+{
+    return GINT_TO_POINTER((vq_nr << 16) | (index & 0xFFFF));
+}
+
 int remote_uring_init(void)
 {
     pthread_mutex_init(&rw_lock, NULL);
     pthread_cond_init(&rw_cond, NULL);
-    int ret = io_uring_queue_init(IO_URING_DEPTH &remote_uring, 0);
+    int ret = io_uring_queue_init(IO_URING_DEPTH, &remote_uring, 0);
     if (ret < 0) {
         fprintf(stderr, "io_uring init failed\n");
         return -1;
+    }
+
+    // initialize GHashTable for virtio-remote socket management
+    if (!gsi_stubs) {
+        gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+    if (!gsi_tables) {
+        gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
     }
     return 0;
 }
@@ -101,63 +123,299 @@ int enable_tcp_keepalive(int fd)
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof(keep_cnt));
     return 0;
 }
-    
+
+void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
+{
+    RemoteVQueueCtx *ctx = vq->remote_ctx;
+    return &ctx->elem;
+}
+
+void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
+                                unsigned int len)
+{
+    RemoteVQueueCtx *ctx = vq->remote_ctx;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe;
+    int resp_header[3];
+
+    resp_header[0] = ctx->vq_nr;
+    resp_header[1] = ctx->elem_index;
+    resp_header[2] = len;
+
+    struct iovec resp_iov[2];
+    resp_iov[0].iov_base = resp_header;
+    resp_iov[0].iov_len = sizeof(resp_header);
+    resp_iov[1].iov_base = ctx->in_buf;
+    resp_iov[1].iov_len = len;
+
+    sqe = io_uring_get_sqe(remote_uring);
+    io_uring_prep_send_zc(sqe, ctx->resp_fd, resp_iov, 2, 0);
+    io_uring_submit(remote_uring);
+    io_uring_wait_cqe(remote_uring, &cqe);
+    io_uring_cqe_seen(remote_uring, cqe);
+
+    g_free(ctx->out_buf);
+    g_free(ctx->in_buf);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+bool remote_virtio_notify_skip(VirtIODevice *vdev)
+{
+    int n;
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        if (vdev->vq[n].remote_ctx) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // cmsvmTODO v2: try decrease the memory region here, maybe flexible array
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
 {
-    // spli ip and port form "ip_port"(xxxx.xxxx.xxxx.xxxx@xxxx)
     char ip[64];
     int port;
-    char *at_pos = strchr(ip_port, '@');
-    if (at_pos == NULL) {
-        return err;
+    const char *at_pos = strchr(ip_port, '@');
+    if (!at_pos) {
+        error_setg(errp, "invalid ip_port format, expected ip@port");
+        return;
     }
-    int ip_len = at_pos - ip_port;
-    strncpy(ip, ip_port, ip_len);
-    ip[ip_len] = '\0';
-    *port = atoi(at_pos + 1);
 
-    // alloc sockets
-    SOCKET_RV *stubs = malloc(sizeof(SOCKET_RV) * VIRTIO_QUEUE_MAX);
+    size_t ip_len = at_pos - ip_port;
+    if (ip_len >= sizeof(ip)) {
+        error_setg(errp, "ip address too long");
+        return;
+    }
+    memcpy(ip, ip_port, ip_len);
+    ip[ip_len] = '\0';
+    port = atoi(at_pos + 1);
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "failed to create socket");
+        return;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
+        error_setg(errp, "invalid ip address: %s", ip);
+        goto err;
+    }
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        error_setg_errno(errp, errno, "failed to connect to %s:%d", ip, port);
+        goto err;
+    }
+
+    enable_tcp_keepalive(fd);
+    *stub = fd;
+
+    if (!gsi_stubs) {
+        gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+    if (!gsi_tables) {
+        gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+    g_hash_table_insert(gsi_stubs, vdev->name, GUINT_TO_POINTER(fd));
+    return;
+
+err:
+    close(fd);
+    return;
+}
+
+// todocmsvm: out_buf and in_buf will be too large for one buffer?
+
+static void remote_stub_read_handler(void *opaque)
+{
+    VirtIODevice *vdev = opaque;
+    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+
+    if (fd < 0) {
+        return;
+    }
+
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe;
+    uint8_t req_header[4 * sizeof(int)];
+    uint8_t *out_buf;
+    int read_cnt, vq_nr, index, out_len, in_len;
+
+    if (!remote_uring) {
+        return;
+    }
+
+    read_cnt = 0;
+    while (read_cnt < (int)sizeof(req_header)) {
+        sqe = io_uring_get_sqe(remote_uring);
+        io_uring_prep_recv(sqe, fd, req_header + read_cnt,
+                           sizeof(req_header) - read_cnt, 0);
+        io_uring_submit(remote_uring);
+        io_uring_wait_cqe(remote_uring, &cqe);
+        if (cqe->res <= 0) {
+            io_uring_cqe_seen(remote_uring, cqe);
+            goto link_err;
+        }
+        read_cnt += cqe->res;
+        io_uring_cqe_seen(remote_uring, cqe);
+    }
+
+    vq_nr  = (req_header[0] << 24) | (req_header[1] << 16) |
+             (req_header[2] << 8) | req_header[3];
+    index  = (req_header[4] << 24) | (req_header[5] << 16) |
+             (req_header[6] << 8) | req_header[7];
+    out_len = (req_header[8] << 24) | (req_header[9] << 16) |
+              (req_header[10] << 8) | req_header[11];
+    in_len  = (req_header[12] << 24) | (req_header[13] << 16) |
+              (req_header[14] << 8) | req_header[15];
+
+    out_buf = g_new0(uint8_t, out_len);
+    if (!out_buf) {
+        return;
+    }
+
+    read_cnt = 0;
+    while (read_cnt < out_len) {
+        sqe = io_uring_get_sqe(remote_uring);
+        io_uring_prep_recv(sqe, fd, out_buf + read_cnt,
+                           out_len - read_cnt, 0);
+        io_uring_submit(remote_uring);
+        io_uring_wait_cqe(remote_uring, &cqe);
+        if (cqe->res <= 0) {
+            io_uring_cqe_seen(remote_uring, cqe);
+            g_free(out_buf);
+            goto link_err;
+        }
+        read_cnt += cqe->res;
+        io_uring_cqe_seen(remote_uring, cqe);
+    }
+
+    VirtQueue *vq = lookup_vq(vdev, vq_nr);
+    if (!vq) {
+        g_free(out_buf);
+        return;
+    }
+
+    RemoteVQueueCtx *ctx = vq->remote_ctx;
+
+    ctx->resp_fd = fd;
+    ctx->vq_nr = vq_nr;
+    ctx->elem_index = index;
+    ctx->out_len = out_len;
+    ctx->in_len = in_len;
+    ctx->out_buf = out_buf;
+    ctx->in_buf = g_new0(uint8_t, in_len);
+    if (!ctx->in_buf) {
+        g_free(out_buf);
+        return;
+    }
+
+    ctx->out_sg[0].iov_base = ctx->out_buf;
+    ctx->out_sg[0].iov_len = ctx->out_len;
+    ctx->in_sg[0].iov_base = ctx->in_buf;
+    ctx->in_sg[0].iov_len = ctx->in_len;
+    ctx->elem.index = ctx->elem_index;
+    ctx->elem.out_num = 1;
+    ctx->elem.in_num = 1;
+    ctx->elem.out_sg = ctx->out_sg;
+    ctx->elem.in_sg = ctx->in_sg;
+
+    vq->handle_output(vdev, vq);
+
+    return;
+
+link_err:
+    qemu_set_fd_handler(fd, NULL, NULL, NULL);
+    close(fd);
+    g_hash_table_remove(gsi_stubs, vdev->name);
+}
+
+static void remote_stub_accept_handler(void *opaque)
+{
+    VirtIODevice *vdev = opaque;
+    int listen_fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+
+    if (listen_fd < 0) {
+        return;
+    }
+
+    int fd = accept(listen_fd, NULL, NULL);
+    if (fd < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            error_report("remote stub accept failed for vdev %s: %s",
+                         vdev->name, strerror(errno));
+        }
+        return;
+    }
+
+    qemu_set_fd_handler(listen_fd, NULL, NULL, NULL);
+    g_hash_table_remove(gsi_stubs, vdev->name);
+    close(listen_fd);
+    enable_tcp_keepalive(fd);
+    g_hash_table_insert(gsi_stubs, vdev->name, GUINT_TO_POINTER(fd));
+
+    qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
+}
+
+void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port, Error **errp)
+{
+    int port;
+    const char *at_pos = strchr(ip_port, '@');
+    if (!at_pos) {
+        error_setg(errp, "invalid ip_port format, expected ip@port");
+        return;
+    }
+    port = atoi(at_pos + 1);
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        error_setg_errno(errp, errno, "failed to create listen socket");
+        return;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        error_setg_errno(errp, errno, "failed to bind listen socket port %d", port);
+        close(listen_fd);
+        return;
+    }
+
+    if (listen(listen_fd, 1) < 0) {
+        error_setg_errno(errp, errno, "failed to listen on socket");
+        close(listen_fd);
+        return;
+    }
+
+    int flags = fcntl(listen_fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)){
-            stubs[n] = -1;
+        if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        VirtQueue *vq = &vdev->vq[n];
-        stubs[n] = socket(AF_INET, SOCK_STREAM, 0);
-        if (stubs[n] < 0) {
-            goto erro;
-        }
-        struct sockaddr_in serv_addr;
-        memset(&serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port   = htons(PORT);
-        if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
-        {
-            close(sock_fd);
-            goto erro;
-        }
-        if (connect(sock_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
-        {
-            close(sock_fd);
-            goto erro;
-        }
-        enable_tcp_keepalive(stubs[n]);
+        RemoteVQueueCtx *ctx = g_new0(RemoteVQueueCtx, 1);
+        vdev->vq[n].remote_ctx = ctx;
     }
 
-    if (!gsi_stubs)
-        gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
-    if (!gsi_tables)
-        gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
+    g_hash_table_insert(gsi_stubs, vdev->name, GUINT_TO_POINTER(listen_fd));
 
-    g_hash_table_insert(gsi_stubs, vdev->name, stubs);
-
-    return;
-
-goto erro;
-    // write errp
-    return;
+    qemu_set_fd_handler(listen_fd, remote_stub_accept_handler, NULL, vdev);
 }
 
 void remote_device_clean_up_hash_table(VirtIODevice *vdev)
@@ -172,41 +430,53 @@ void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 
 void close_remote_virtio_device_sockets(VirtIODevice *vdev)
 {
-    SOCKET_RV *stubs = g_hash_table_lookup(gsi_stubs, vdev->name);
+    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+    if (fd >= 0) {
+        qemu_set_fd_handler(fd, NULL, NULL, NULL);
+        close(fd);
+    }
+    g_hash_table_remove(gsi_stubs, vdev->name);
+
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (stubs[n] >= 0)
-            close(stubs[n]);
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        RemoteVQueueCtx *ctx = vdev->vq[n].remote_ctx;
+        if (ctx) {
+            g_free(ctx->out_buf);
+            g_free(ctx->in_buf);
+            g_free(ctx);
+            vdev->vq[n].remote_ctx = NULL;
+        }
     }
 }
 
-/* device usage don't need recover desc meta
-*  send: [index, sg1, ...]
-*  recv: [index, data]  --> regard elem->out_num = 1; elem->out_sg[0].io_base = data;
-*/
-
-/* vq resp need recover desc meta
-*  resp: [index, data_len, data]
-*  recv: [index, data_len, sg1, ...]
-*/
+/*
+ * Single-socket protocol per vdev:
+*  req (local->remote): [vq_nr(4B), elem_index(4B), out_len(4B), out_sg_data...]
+*  resp (remote->local): [vq_nr(4B), elem_index(4B), data_len(4B), data...]
+ */
 
 typedef struct ListenerParam {
-    VirtQueue *vq;
+    VirtIODevice *vdev;
     SOCKET_RV stub;
 } ListenerParam;
 
-void resp_listener(ListenerParam* param)
+void resp_listener(ListenerParam *param)
 {
-    VirtQueue *vq = param->vq;
+    VirtIODevice *vdev = param->vdev;
     SOCKET_RV stub = param->stub;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
-    uint8_t resp_index[sizeof(int)], resp_len[sizeof(int)];
-    int index, len;
+    uint8_t resp_header[3 * sizeof(int)];
+    // scoket determined vdev, so we need vq_nr and index to locate desc link
+    int vq_nr, index, len;
     int read_cnt, phase;
     VirtQueueElement *elem;
-    char* buf;
-    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vq->vdev->name);
-    if (gsi_elems) {
+    VirtQueue *vq;
+    char *buf;
+    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vdev->name);
+    if (!gsi_elems) {
         goto hash_err;
     }
 
@@ -219,17 +489,18 @@ listen_begin:
         }
         pthread_mutex_unlock(&rw_lock);
 
-        if (!sending)
+        if (!sending) {
             break;
-        
+        }
+
         read_cnt = 0;
-listen_index:
+listen_header:
         phase = 1;
-        while (read_cnt < sizeof(int)) { // index
+        while (read_cnt < (int)sizeof(resp_header)) {
             sqe = io_uring_get_sqe(remote_uring);
-            io_uring_prep_recv(sqe, stub, resp_index + read_cnt, 4 - read_cnt);
+            io_uring_prep_recv(sqe, stub, resp_header + read_cnt,
+                               sizeof(resp_header) - read_cnt, 0);
             io_uring_submit(remote_uring);
-            // blocking, do not consume cpu cycles
             io_uring_wait_cqe(remote_uring, &cqe);
             if (cqe->res <= 0) {
                 io_uring_cqe_seen(remote_uring, cqe);
@@ -238,95 +509,85 @@ listen_index:
             read_cnt += cqe->res;
             io_uring_cqe_seen(remote_uring, cqe);
         }
-        index = (resp_index[0] << 24) | (resp_index[1] << 16) | (resp_index[2] << 8) | resp_index[3];
+        vq_nr = (resp_header[0] << 24) | (resp_header[1] << 16) |
+                (resp_header[2] << 8) | resp_header[3];
+        index = (resp_header[4] << 24) | (resp_header[5] << 16) |
+                (resp_header[6] << 8) | resp_header[7];
+        len   = (resp_header[8] << 24) | (resp_header[9] << 16) |
+                (resp_header[10] << 8) | resp_header[11];
 
-        read_cnt = 0;
-listen_len:
-        phase = 2;
-        while(read_cnt < sizeof(int)) { // len
-            sqe = io_uring_get_sqe(remote_uring);
-            io_uring_prep_recv(sqe, stub, resp_len + read_cnt, 4 - read_cnt);
-            io_uring_submit(remote_uring);
-            // blocking, do not consume cpu cycles
-            io_uring_wait_cqe(remote_uring, &cqe);
-            if (cqe->res <= 0) {
-                io_uring_cqe_seen(remote_uring, cqe);
-                goto link_err;
-            }
-            read_cnt += cqe->res;
-            io_uring_cqe_seen(remote_uring, cqe);
-        }
-        len = (resp_len[0] << 24) | (resp_len[1] << 16) | (resp_len[2] << 8) | resp_len[3];
-
-        elem = g_hash_table_lookup(gsi_elems, GINT_TO_POINTER(index));
-        if (!elem)
+        vq = lookup_vq(vdev, vq_nr);
+        if (!vq) {
             goto elem_err;
+        }
 
-        // cmsvmtodo: maybe more efficient way?
-        // version1: move socket data to userspace buffer, then recover as sg_table
-        buf = (char*)malloc(len);
+        elem = g_hash_table_lookup(gsi_elems, make_elem_key(vq_nr, index));
+        if (!elem) {
+            goto elem_err;
+        }
+
+        buf = g_new0(char, len);
         read_cnt = 0;
 listen_data:
-        phase = 3;
+        phase = 2;
         while (read_cnt < len) {
             sqe = io_uring_get_sqe(remote_uring);
-            io_uring_prep_recv(sqe, stub, buf + read_cnt, len - read_cnt);
-            io_uring_submit();
-            // blocking
+            io_uring_prep_recv(sqe, stub, buf + read_cnt, len - read_cnt, 0);
+            io_uring_submit(remote_uring);
             io_uring_wait_cqe(remote_uring, &cqe);
             if (cqe->res <= 0) {
-                io_uring_cqe_seen(cqe);
+                io_uring_cqe_seen(remote_uring, cqe);
+                g_free(buf);
                 goto link_err;
             }
             read_cnt += cqe->res;
-            io_uring_seen(cqe);
+            io_uring_cqe_seen(remote_uring, cqe);
         }
 
-        // push to vq
+        iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
+        g_free(buf);
+
         virtqueue_push(vq, elem, elem->len);
 
-        // clear hash
-        g_hash_table_remove(gsi_elems, GINT_TO_POINTER(index));
+        g_hash_table_remove(gsi_elems, make_elem_key(vq_nr, index));
         recved++;
     }
 
     return;
 
-// cmsvmtodo: error handling
 hash_err:
     return;
 link_err:
-    if (!reconnect_tcp_socket(param->stub) && buf) {
-        // reconnect failing
-        free(buf);
+    if (!reconnect_tcp_socket(stub) && buf) {
+        g_free(buf);
         return;
-    };
+    }
     switch (phase) {
     case 0:
         goto listen_begin;
     case 1:
-        goto listen_index;
+        goto listen_header;
     case 2:
-        goto listen_len;
-    case 3:
         goto listen_data;
     default:
         return;
     }
 elem_err:
+    g_free(buf);
     return;
 }
 
 void route_to_remote(VirtQueue *vq, SOCKET_RV stub)
 {
-    VirtQueueElement* (*remote_virtqueue_pop)(VirtQueue, size_t);
+    VirtQueueElement* (*remote_virtqueue_pop)(VirtQueue *, size_t);
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vq->vdev->name);
+    int vq_nr = vq - vq->vdev->vq;
 
     if (virtio_device_disabled(vq->vdev)) {
-        return 0;
+        return;
     }
 
     if (virtio_vdev_has_feature(vq->vdev, VIRTIO_F_RING_PACKED)) {
@@ -335,29 +596,36 @@ void route_to_remote(VirtQueue *vq, SOCKET_RV stub)
         remote_virtqueue_pop = virtqueue_split_pop;
     }
 
-    while (elem = remote_virtqueue_pop(vq, sizeof(VirtQueueElement))) {
-        // sent to remote
+    while ((elem = remote_virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         struct iovec msg_sg[elem->out_num + 1];
-        msg_sg[0].iov_base = malloc(sizeof(int));
-        memcpy(msg_sg[0].iov_base, &elem->index, sizeof(int));
-        msg_sg[0].iov_len = sizeof(int);
-        memcpy(msg_sg + 1, elem->out_sg, elem->out_num);
+        int header[4];
+        header[0] = vq_nr;
+        header[1] = elem->index;
+        header[2] = 0;
+        for (int i = 0; i < elem->out_num; i++) {
+            header[2] += elem->out_sg[i].iov_len;
+        }
+        header[3] = 0;
+        for (int i = 0; i < elem->in_num; i++) {
+            header[3] += elem->in_sg[i].iov_len;
+        }
+        msg_sg[0].iov_base = g_malloc(sizeof(header));
+        memcpy(msg_sg[0].iov_base, header, sizeof(header));
+        msg_sg[0].iov_len = sizeof(header);
+        memcpy(msg_sg + 1, elem->out_sg, elem->out_num * sizeof(struct iovec));
         sqe = io_uring_get_sqe(remote_uring);
         io_uring_prep_send_zc(sqe, stub, msg_sg, elem->out_num + 1, 0);
-        io_uring_sqe_set_data(sqe, msg_sg);
+        io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(remote_uring);
-        // synchronous waiting for strong ordering
         io_uring_wait_cqe(remote_uring, &cqe);
-        free(msg_sg[0]);
+        g_free(msg_sg[0].iov_base);
 
         // a new resp is needed
         if (elem->in_num > 0) {
-            // store elem for listener
-            g_hash_table_add(gsi_elems, GINT_TO_POINTER(elem->index), elem);
+            g_hash_table_insert(gsi_elems, make_elem_key(vq_nr, elem->index), elem);
             sent++;
             pthread_cond_signal(&rw_cond);
         } else {
-            // handle done
             virtqueue_push(vq, elem, 0);
         }
     }
@@ -369,32 +637,29 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         sent = 0;
         recved = 0;
         VirtIODevice *vdev = vq->vdev;
-        // require vdev to use vq sequentially
-        SOCKET_RV remote_stubs[] = g_hash_table_lookup(gsi_rvdevs, vdev->name);
+        SOCKET_RV stub = (SOCKET_RV)GPOINTER_TO_UINT(
+            g_hash_table_lookup(gsi_stubs, vdev->name));
 
         if (unlikely(vdev->broken)) {
             return;
         }
 
-        if (remote_uring)
+        if (!remote_uring) {
             remote_uring_init();
+        }
 
         trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        // create a listener
         sending = true;
         QemuThread listener;
         ListenerParam *param = g_new0(ListenerParam, 1);
-        param->vq = vq;
-        param->stub = remote_stubs[vq - vdev->vq];
-        qemu_thread_create(&listener, "remote_virtqueu_listener",
+        param->vdev = vdev;
+        param->stub = stub;
+        qemu_thread_create(&listener, "remote_virtqueue_listener",
                            resp_listener, param, QEMU_THREAD_JOINABLE);
-        // route to remote machine
-        route_to_remote(vq, remote_stubs[vq - vdev->vq]);
-        // send over, but may not recv all resp
+        route_to_remote(vq, stub);
         sending = false;
         pthread_cond_signal(&rw_cond);
-        // wait listener exit
-        qemu_thread_join(&resp_thread);
+        qemu_thread_join(&listener);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
@@ -516,4 +781,12 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
     // need to close sockets
     close_remote_virtio_device_sockets(vdev);
     remote_device_clean_up_hash_table(vdev);
+    // todocmsvm: need to free heap mem
+}
+
+void remote_virtio_pci_notify(DeviceState *dev, uint16_t vector)
+{
+    // we don't need to write msi-x or irq
+    // wait remote_stub_read_handler to send resp
+    return;
 }

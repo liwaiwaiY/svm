@@ -1210,7 +1210,7 @@ static int device_help_func(void *opaque, QemuOpts *opts, Error **errp)
 static int device_init_func(void *opaque, QemuOpts *opts, Error **errp)
 {
     DeviceState *dev;
-
+    
     dev = qdev_device_add(opts, errp);
     if (!dev && *errp) {
         error_report_err(*errp);
@@ -2730,6 +2730,14 @@ static void qemu_init_board(void)
     realtime_init();
 }
 
+// cmsvm
+static remote_stub_create_virtio_devices(void)
+{
+    DeviceOption *opt;
+    qemu_opts_foreach(qemu_find_opts("device"),
+                      remote_stub_device_init_func, NULL, &error_fatal);
+}
+
 static void qemu_create_cli_devices(void)
 {
     DeviceOption *opt;
@@ -2835,6 +2843,58 @@ void qmp_x_exit_preconfig(Error **errp)
     } else if (autostart) {
         qmp_cont(NULL);
     }
+}
+
+// cmsvm
+// simplified init for remote stub backend driver
+// only init critical subsystems for virtio backend driver
+// no vcpu, no machine, no board initialization
+void qemu_init_remote_stub(int argc, char **argv)
+{
+    Error *err = NULL;
+
+    // 1. error system initialization (required for error_report)
+    error_init(argv[0]);
+
+    // 2. program path initialization (for loading virtio modules)
+    qemu_init_exec_dir(argv[0]);
+
+    // 3. system resource limits (file handles, lock memory for virtio backend IO)
+    os_setup_limits();
+
+    // 4. set line buffering for stdout/stderr
+    os_set_line_buffering();
+
+    // 5. add run options
+    qemu_add_run_with_opts();
+
+    // 6. register only necessary opts for virtio backend
+    qemu_add_opts(&qemu_device_opts);
+    qemu_add_opts(&qemu_virtio_opts);
+
+    // 7. execute MODULE_INIT_QOM phase (register QOM types for -device)
+    module_call_init(MODULE_INIT_QOM);
+
+    // 8. execute MODULE_INIT_OPTS phase (register cmdline option parsers)
+    module_call_init(MODULE_INIT_OPTS);
+
+    // 9. architecture whitelist (prevent loading incompatible modules)
+    module_allow_arch(target_name());
+
+    // 10. initialize main event loop (virtio depends on aio/event)
+    if (qemu_init_main_loop(&err) < 0) {
+        error_reportf_err(err, "failed to initialize main loop: ");
+        exit(1);
+    }
+
+    // 11. mark qdev machine creation done (required for device realization)
+    qdev_machine_creation_done();
+
+    // 12. initialize socket subsystem (for virtio-remote communication)
+    socket_init();
+
+    // 13. create virtio devices from -device options (triggers socket listen)
+    remote_stub_create_virtio_devices();
 }
 
 void qemu_init(int argc, char **argv)

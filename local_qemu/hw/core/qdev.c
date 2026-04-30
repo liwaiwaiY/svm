@@ -144,15 +144,6 @@ bool qdev_set_parent_bus(DeviceState *dev, BusState *bus, Error **errp)
     return true;
 }
 
-DeviceState *remote_qdev_new(const char* name, const char* ip_port)
-{
-    // cmsvm
-    DeviceState* dev = DEVICE(object_new(qname));
-    object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp);
-    object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp)
-    return dev;
-}
-
 DeviceState *qdev_new(const char *name)
 {
     return DEVICE(object_new(name));
@@ -270,6 +261,31 @@ static void device_reset_child_foreach(Object *obj, ResettableChildCallback cb,
     }
 }
 
+// cmsvm
+static bool local_qemu_post_device_realize(DeviceState *dev, char *ip_port, Error **errp)
+{
+    // if remote is nullptr, it has to be stub
+    return ip_port &&
+           object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp) &&
+           object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp);
+}
+
+// cmsvm
+static bool remote_stub_post_device_realize(DeviceState *dev, char *ip_port, Error **errp)
+{
+    // open a socket to listen local connection
+    return object_property_set_str(OBJECT(dev), "remote-stub", ip_port, errp) &&
+           object_property_set_bool(OBJECT(dev->bus), "remote", true, errp);
+}
+
+bool qdev_realize_cmsvm(DeviceState *dev, BusState *bus, char* remote, Error **errp)
+{
+    // todocmsvm: check if they have true or false
+    return qdev_realize(dev, bus, errp) &&
+           (local_qemu_post_device_realize(dev, remote, errp) ||
+           remote_stub_post_device_realize(dev, remote, errp));
+}
+
 bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
 {
     assert(!dev->realized && !dev->parent_bus);
@@ -283,29 +299,6 @@ bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
     }
 
     return object_property_set_bool(OBJECT(dev), "realized", true, errp);
-}
-
-// cmsvm v1.1
-bool remote_qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
-{
-    assert(!dev->realized && !dev->parent_bus);
-
-    if (bus) {
-        if (!qdev_set_parent_bus(dev, bus, errp)) {
-            return false;
-        }
-    } else {
-        assert(!DEVICE_GET_CLASS(dev)->bus_type);
-    }
-
-    if(!object_property_set_bool(OBJECT(dev), "realized", true, errp))
-        return false;
-    // return of object_property_set_xxx is determined by errp
-    if(!object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp))
-        return false;
-    if(!object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp))
-        return false;
-    return true;
 }
 
 bool qdev_realize_and_unref(DeviceState *dev, BusState *bus, Error **errp)

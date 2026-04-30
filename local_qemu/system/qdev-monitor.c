@@ -640,13 +640,13 @@ BusState *qdev_find_default_bus(DeviceClass *dc, Error **errp)
     return bus;
 }
 
+// cmsvm: all remote devices need to be optioned with "remote"
 DeviceState *qdev_device_add_from_qdict(const QDict *opts,
                                         bool from_json, Error **errp)
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    // cmsvm version1:
-    // if user config option "--remote xxxx.xxxx.xxxx.xxxx@xxxx", we decide it as a remote dev
+    // option is ip_port: "xxx.xxx.xxx.xxx@xxxx"
     const char *driver, *path, *remote;
     char *id;
     DeviceState *dev;
@@ -659,7 +659,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
-    remote = qdict_get_try_str(opts, "remote");
+    remote = qdic_get_try_str(opts, "remote");
 
     /* find driver */
     dc = qdev_get_device_class(&driver, errp);
@@ -701,13 +701,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
-    // cmsvm v1: we leave socket connection into realize, as this is a part of device plug
-    // if (unlike(remote)) {
-    //     dev = remote_qdev_new(driver, remote);
-    // } else {
-    //     dev = qdev_new(driver);
-    // }
-    /* create device */
+    // we move socketing openning into realize phase as it is a part of device plugging
     dev = qdev_new(driver);
 
     /* Check whether the hotplug is allowed by the machine */
@@ -730,6 +724,8 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     qdict_del(properties, "driver");
     qdict_del(properties, "bus");
     qdict_del(properties, "id");
+    // cmsvm
+    qdict_del(properties, "remote");
 
     object_set_properties_from_keyval(&dev->parent_obj, properties, from_json,
                                       errp);
@@ -738,19 +734,10 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         goto err_del_dev;
     }
 
-    // if (!qdev_realize(dev, bus, errp)) {
-    //     goto err_del_dev;
-    // }
-
-    // cmsvm v1.1
-    if (unlikely(remote)) {
-        if (!remote_qdev_realize(dev, bus, remote, errp)) {
-            goto err_del_dev;
-        }
-    } else {
-        if (!qdev_realize(dev, bus, errp)) {
-            goto err_del_dev;
-        }
+    // cmsvm
+    if ((remote && !qdev_realize_cmsvm(dev, bus, remote, errp)) ||
+        !qdev_realize(dev, bus, errp)) {
+        goto err_del_dev;
     }
 
     return dev;

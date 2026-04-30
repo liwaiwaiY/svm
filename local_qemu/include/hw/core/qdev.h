@@ -444,9 +444,6 @@ compat_props_add(GPtrArray *arr,
  * Return: a derived DeviceState object with a reference count of 1.
  */
 DeviceState *qdev_new(const char *name);
-// cmsvm
-// remote version
-DeviceState *remote_qdev_new(const char* name, const char* ip_port)
 
 /**
  * qdev_try_new: Try to create a device on the heap
@@ -491,7 +488,7 @@ static inline bool qdev_is_realized(DeviceState *dev)
  */
 bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp);
 // cmsvm
-bool remote_qdev_realize(DeviceState *dev, BusState *bus, Error **errp);
+bool qdev_realize_cmsvm(DeviceState *dev, BusState *bus, char* remote, bool stub, Error **errp);
 
 /**
  * qdev_realize_and_unref: Realize @dev and drop a reference

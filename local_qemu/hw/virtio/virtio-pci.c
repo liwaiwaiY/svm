@@ -2652,6 +2652,12 @@ static void virtio_pci_bus_new(VirtioBusState *bus, size_t bus_size,
     qbus_init(bus, bus_size, TYPE_VIRTIO_PCI_BUS, qdev, virtio_bus_name);
 }
 
+void virtio_pci_bus_set_remote(VirtioBusClass *vbus, bool value, Error **errp)
+{
+    // todocmsvm include realted header file
+    k->notify = remote_virtio_pci_notify;
+}
+
 static void virtio_pci_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *bus_class = BUS_CLASS(klass);
@@ -2678,6 +2684,9 @@ static void virtio_pci_bus_class_init(ObjectClass *klass, const void *data)
     k->get_dma_as = virtio_pci_get_dma_as;
     k->iommu_enabled = virtio_pci_iommu_enabled;
     k->queue_enabled = virtio_pci_queue_enabled;
+
+    object_class_property_add_bool(k, "remote",
+                                   NULL, virtio_pci_bus_set_remote);
 }
 
 static const TypeInfo virtio_pci_bus_info = {

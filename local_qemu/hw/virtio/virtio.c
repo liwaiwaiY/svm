@@ -25,6 +25,7 @@
 #include "hw/core/cpu.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/vhost.h"
+#include "hw/virtio-remote/virtio-remote.h"
 #include "migration/qemu-file-types.h"
 #include "qemu/atomic.h"
 #include "hw/virtio/virtio-bus.h"
@@ -156,6 +157,8 @@ struct VirtQueue
     EventNotifier host_notifier;
     bool host_notifier_enabled;
     QLIST_ENTRY(VirtQueue) node;
+
+    void *remote_ctx;
 };
 
 const char *virtio_device_names[] = {
@@ -786,6 +789,10 @@ static int virtio_queue_packed_empty(VirtQueue *vq)
 
 int virtio_queue_empty(VirtQueue *vq)
 {
+    if (vq->remote_ctx) {
+        return 0;
+    }
+
     if (virtio_vdev_has_feature(vq->vdev, VIRTIO_F_RING_PACKED)) {
         return virtio_queue_packed_empty(vq);
     } else {
@@ -884,6 +891,10 @@ static void virtqueue_unmap_sg(VirtQueue *vq, const VirtQueueElement *elem,
 void virtqueue_detach_element(VirtQueue *vq, const VirtQueueElement *elem,
                               unsigned int len)
 {
+    if (vq->remote_ctx) {
+        return;
+    }
+
     vq->inuse -= elem->ndescs;
     virtqueue_unmap_sg(vq, elem, len);
 }
@@ -1067,6 +1078,11 @@ static void virtqueue_packed_fill_desc(VirtQueue *vq,
 void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx)
 {
+    if (vq->remote_ctx) {
+        remote_stub_virtqueue_push(vq, elem, len);
+        return;
+    }
+
     trace_virtqueue_fill(vq, elem, len, idx);
 
     virtqueue_unmap_sg(vq, elem, len);
@@ -1205,6 +1221,10 @@ static void virtqueue_ordered_flush(VirtQueue *vq)
 
 void virtqueue_flush(VirtQueue *vq, unsigned int count)
 {
+    if (vq->remote_ctx) {
+        return;
+    }
+
     if (virtio_device_disabled(vq->vdev)) {
         vq->inuse -= count;
         return;
@@ -1222,6 +1242,11 @@ void virtqueue_flush(VirtQueue *vq, unsigned int count)
 void virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len)
 {
+    if (vq->remote_ctx) {
+        remote_stub_virtqueue_push(vq, elem, len);
+        return;
+    }
+
     RCU_READ_LOCK_GUARD();
     virtqueue_fill(vq, elem, len, 0);
     virtqueue_flush(vq, 1);
@@ -2029,6 +2054,10 @@ err_undo_map:
 
 void *virtqueue_pop(VirtQueue *vq, size_t sz)
 {
+    if (vq->remote_ctx) {
+        return remote_stub_virtqueue_pop(vq, sz);
+    }
+
     if (virtio_device_disabled(vq->vdev)) {
         return NULL;
     }
@@ -2729,6 +2758,10 @@ static void virtio_irq(VirtQueue *vq)
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
+    if (vq->remote_ctx) {
+        return;
+    }
+
     WITH_RCU_READ_LOCK_GUARD() {
         if (!virtio_should_notify(vdev, vq)) {
             return;
@@ -2741,6 +2774,10 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 
 void virtio_notify_config(VirtIODevice *vdev)
 {
+    if (remote_virtio_notify_skip(vdev)) {
+        return;
+    }
+
     if (!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK))
         return;
 
@@ -4253,22 +4290,29 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
 }
 
 // cmsvm
-void virtio_device_set_remote_virtio(Object *obj, bool value, Error **errp)
+static void virtio_device_set_remote_virtio(Object *obj, bool value, Error **errp)
 {
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
     vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
 }
 
-
+// tododel
 // set string, value is target str (ip-prot: xxxx.xxxx.xxxx.xxxx@xxxx)
 // directly call virtio-remote to open socket. As qemu_create_cli_devices is the last init function, we regard it as not cost much
 // Also this property is set after all objects are initialized, we know which vq is activated
 // so we commend at version 1 to config remote virtio option for last cmd params
 // cmsvm
-void virtio_device_set_remote_machine(Object *obj, const char *value, Error **errp)
+static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
 {
-    init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, Error **errp);
+    remote_uring_init();
+    init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
+}
+
+static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error *errp)
+{
+    remote_uring_init();
+    init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
@@ -4283,11 +4327,12 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, virtio_properties);
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
-    // cmsvm
     object_class_property_add_bool(vdc, "remote-virtio",
-                                   NULL, virtio_device_set_remote_virtio);
+                                  NULL, virtio_device_set_remote_virtio);
     object_class_property_add_str(vdc, "remote-machine",
-                                  NULL, virtio_device_set_remote_machine)
+                                  NULL, virtio_device_set_remote_machine);
+    object_class_property_add_str(vdc, "remote-stub",
+                                  NULL, virtio_device_set_remote_stub);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }
