@@ -14,9 +14,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define MAX_FD VIRTIO_QUEUE_MAX
-#define SOCKET_RV int
-
 typedef struct {
     int resp_fd;
     int vq_nr;
@@ -46,13 +43,23 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 void remote_virtio_queue_host_notifier_read(EventNotifier *n);
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp);
 void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port,Error **errp);
-int remote_uring_init(void);
+int remote_uring_init(bool remote_stub);
 void remote_virtio_pci_notify(DeviceState *dev, uint16_t vector);
 
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len);
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
+
+inline void virtio_remote_ctx_free(VirtQueue *vq) {
+    if (vdev->vq.remote_ctx) {
+        RemoteVQueueCtx *ctx = vdev->vq.remote_ctx;
+        g_free(ctx->out_buf);
+        g_free(ctx->in_buf);
+        g_free(ctx);
+        vdev->vq.remote_ctx = NULL;
+    }
+};
 
 // vhost
 

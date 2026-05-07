@@ -1079,7 +1079,8 @@ static void virtqueue_packed_fill_desc(VirtQueue *vq,
 void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx)
 {
-    if (vq->remote_ctx) {
+    // cmsvm
+    if (vq->remote_ctx) { // if backend uses batching, we don't use it
         remote_stub_virtqueue_push(vq, elem, len);
         return;
     }
@@ -1243,6 +1244,7 @@ void virtqueue_flush(VirtQueue *vq, unsigned int count)
 void virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len)
 {
+    // cmsvm
     if (vq->remote_ctx) {
         remote_stub_virtqueue_push(vq, elem, len);
         return;
@@ -2055,7 +2057,7 @@ err_undo_map:
 
 void *virtqueue_pop(VirtQueue *vq, size_t sz)
 {
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx) { // local_qemu this will be NULL
         return remote_stub_virtqueue_pop(vq, sz);
     }
 
@@ -2609,9 +2611,10 @@ VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
 
 void virtio_delete_queue(VirtQueue *vq)
 {
-    vq->vring.num = 0;
     vq->vring.num_default = 0;
     vq->handle_output = NULL;
+    // cmsvm
+    virtio_remote_ctx_free(vq);
     g_free(vq->used_elems);
     vq->used_elems = NULL;
     virtio_virtqueue_reset_region_cache(vq);
@@ -4155,6 +4158,8 @@ static void virtio_device_free_virtqueues(VirtIODevice *vdev)
         if (vdev->vq[i].vring.num == 0) {
             break;
         }
+        // cmsvm
+        virtio_remote_ctx_free(vdev->vq[i]);
         virtio_virtqueue_reset_region_cache(&vdev->vq[i]);
     }
     g_free(vdev->vq);
@@ -4306,21 +4311,17 @@ static void virtio_device_set_remote_virtio(Object *obj, bool value, Error **err
     vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
 }
 
-// tododel
-// set string, value is target str (ip-prot: xxxx.xxxx.xxxx.xxxx@xxxx)
-// directly call virtio-remote to open socket. As qemu_create_cli_devices is the last init function, we regard it as not cost much
-// Also this property is set after all objects are initialized, we know which vq is activated
-// so we commend at version 1 to config remote virtio option for last cmd params
 // cmsvm
 static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
 {
-    remote_uring_init();
+    remote_uring_init(false);
     init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 
+// cmsvm
 static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error *errp)
 {
-    remote_uring_init();
+    remote_uring_init(true);
     init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 

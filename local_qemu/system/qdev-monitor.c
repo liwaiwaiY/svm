@@ -646,7 +646,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    // option is ip_port: "xxx.xxx.xxx.xxx@xxxx"
+    // cmsvm option is ip_port: "xxx.xxx.xxx.xxx@xxxx"
     const char *driver, *path, *remote;
     char *id;
     DeviceState *dev;
@@ -659,7 +659,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
-    remote = qdic_get_try_str(opts, "remote");
+    remote = qdict_get_try_str(opts, "remote");
 
     /* find driver */
     dc = qdev_get_device_class(&driver, errp);
@@ -701,7 +701,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         return NULL;
     }
 
-    // we move socketing openning into realize phase as it is a part of device plugging
+    // cmsvm: we move socketing openning into realize phase as it is a part of device plugging
     dev = qdev_new(driver);
 
     /* Check whether the hotplug is allowed by the machine */
