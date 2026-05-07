@@ -46,6 +46,12 @@
 #include <liburing.h>
 #include <fcntl.h>
 
+/*
+*  Transport Protocol:
+*  req (local->remote): [vq_nr(4B), elem_index(4B), out_len(4B), in_len(4B), out_sg_data...]
+*  resp (remote->local): [vq_nr(4B), elem_index(4B), data_len(4B), data...]
+*/
+
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 
 // each vdev has one TCP socket to remote stub
@@ -65,6 +71,11 @@ static pthread_cond_t   rw_cond;
 
 static int sent, recved;
 static bool sending = false;
+
+bool check_virtio_device_remote(VirtIODevice *vdev)
+{
+    return g_hash_table_contains(gsi_stubs, vdev->name);
+}
 
 static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
 {
@@ -124,10 +135,50 @@ int enable_tcp_keepalive(int fd)
     return 0;
 }
 
+static void *remote_stub_virtqueue_alloc_element(size_t sz, unsigned out_num, unsigned in_num)
+{
+    VirtQueueElement *elem;
+    size_t in_addr_ofs = QEMU_ALIGN_UP(sz, __alignof__(elem->in_addr[0]));
+    size_t out_addr_ofs = in_addr_ofs + in_num * sizeof(elem->in_addr[0]);
+    size_t out_addr_end = out_addr_ofs + out_num * sizeof(elem->out_addr[0]);
+    size_t in_sg_ofs = QEMU_ALIGN_UP(out_addr_end, __alignof__(elem->in_sg[0]));
+    size_t out_sg_ofs = in_sg_ofs + in_num * sizeof(elem->in_sg[0]);
+    size_t out_sg_end = out_sg_ofs + out_num * sizeof(elem->out_sg[0]);
+
+    assert(sz >= sizeof(VirtQueueElement));
+    elem = g_malloc(out_sg_end);
+    // trace_virtqueue_alloc_element(elem, sz, in_num, out_num);
+    elem->out_num = out_num;
+    elem->in_num = in_num;
+    elem->in_addr = (void *)elem + in_addr_ofs;
+    elem->out_addr = (void *)elem + out_addr_ofs;
+    elem->in_sg = (void *)elem + in_sg_ofs;
+    elem->out_sg = (void *)elem + out_sg_ofs;
+    return elem;
+}
+
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
     RemoteVQueueCtx *ctx = vq->remote_ctx;
-    return &ctx->elem;
+    int out_num = ctx->out_num, in_num = ctx->in_num;
+    VirtQueueElement *ret = remote_stub_virtqueue_alloc_element(sz, out_num, in_num);
+    ret->index = ctx->index;
+    ret->ndescs = 1;
+    ret->in_order_filled = false;
+    ret->len = 0;
+    // out_addr and in_addr fields are filled to prevent escape
+    // need to handle in migration
+    for (i = 0; i < out_num; i++) {
+        ret->out_addr[i] = 0;
+        ret->out_sg[i] = ctx->out_sg[i];
+    }
+    for (i = 0; i < in_num; i++) {
+        ret->out_addr[i] = 0;
+        ret->in_sg[i] = ctx->in_sg[out_num + i];
+    }
+    // record element
+    ctx->elem = (void *)ret;
+    return ret;
 }
 
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
@@ -303,6 +354,8 @@ static void remote_stub_read_handler(void *opaque)
     }
 
     RemoteVQueueCtx *ctx = vq->remote_ctx;
+    // todocmsvm: the remote_ctx has not allocated yet
+    // leave elem be allocated when calling pop by hadnle_outpu
 
     ctx->resp_fd = fd;
     ctx->vq_nr = vq_nr;
@@ -320,13 +373,29 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_sg[0].iov_len = ctx->out_len;
     ctx->in_sg[0].iov_base = ctx->in_buf;
     ctx->in_sg[0].iov_len = ctx->in_len;
-    ctx->elem.index = ctx->elem_index;
-    ctx->elem.out_num = 1;
-    ctx->elem.in_num = 1;
-    ctx->elem.out_sg = ctx->out_sg;
-    ctx->elem.in_sg = ctx->in_sg;
 
     vq->handle_output(vdev, vq);
+
+    struct iovec msg_sg[2];
+    VirtQueueElement *elem = (VirtQueueElement *)ctx->elem;
+    msg_sg[0].iov_base = g_malloc(sizeof(int) * 3);
+    msg_sg[0].iov_len = sizeof(int) * 3;
+    msg_sg[0].iov_base[0] = vq_nr;
+    msg_sg[0].iov_base[1] = index;
+    msg_sg[0].iov_base[2] = elem->len;
+    msg_sg[1].iov_base = ctx->in_sg[0].iov_base;
+    msg_sg[1].iov_len = elem->len;
+
+    sqe = io_uring_get_sqe(remote_uring);
+    io_uring_prep_send_zc(sqe, fd, msg_sg, 2, 0);
+    io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
+    io_uring_submit(remote_uring);
+    io_uring_wait_cqe(remote_uring, &cqe);
+
+
+    g_free(msg_sg[0]);
+    g_free(ctx->in_buf);
+    g_free(out_buf);
 
     return;
 
@@ -451,12 +520,6 @@ void close_remote_virtio_device_sockets(VirtIODevice *vdev)
     }
 }
 
-/*
- * Single-socket protocol per vdev:
-*  req (local->remote): [vq_nr(4B), elem_index(4B), out_len(4B), out_sg_data...]
-*  resp (remote->local): [vq_nr(4B), elem_index(4B), data_len(4B), data...]
- */
-
 typedef struct ListenerParam {
     VirtIODevice *vdev;
     SOCKET_RV stub;
@@ -547,7 +610,10 @@ listen_data:
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         g_free(buf);
 
+        // todocmsvm first: here may need fill multipletimes, and batching notify
+        // like virtio-net rx
         virtqueue_push(vq, elem, elem->len);
+        virtqueue_notify(vq);
 
         g_hash_table_remove(gsi_elems, make_elem_key(vq_nr, index));
         recved++;
@@ -784,9 +850,4 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
     // todocmsvm: need to free heap mem
 }
 
-void remote_virtio_pci_notify(DeviceState *dev, uint16_t vector)
-{
-    // we don't need to write msi-x or irq
-    // wait remote_stub_read_handler to send resp
-    return;
-}
+// -------------- vhost --------------

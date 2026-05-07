@@ -158,6 +158,7 @@ struct VirtQueue
     bool host_notifier_enabled;
     QLIST_ENTRY(VirtQueue) node;
 
+    // cmsvm
     void *remote_ctx;
 };
 
@@ -3953,8 +3954,16 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
         virtio_queue_set_notification(vq, 1);
     }
 
+    // cmsvm
+    void (*virtio_queue_host_notifier_read)(EventNotifier *n) cb = NULL;
+    if (unlikely(check_virtio_device_remote(vq->vdev))) {
+        cb = remote_virtio_queue_host_notifier_read;
+    } else {
+        cb = virtio_queue_host_notifier_read;
+    }
+
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           virtio_queue_host_notifier_read,
+                           cb,
                            virtio_queue_host_notifier_aio_poll,
                            virtio_queue_host_notifier_aio_poll_ready);
     aio_set_event_notifier_poll(ctx, &vq->host_notifier,
@@ -4327,6 +4336,7 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, virtio_properties);
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
+    // cmsvm
     object_class_property_add_bool(vdc, "remote-virtio",
                                   NULL, virtio_device_set_remote_virtio);
     object_class_property_add_str(vdc, "remote-machine",

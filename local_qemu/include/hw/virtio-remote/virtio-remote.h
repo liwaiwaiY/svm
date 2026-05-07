@@ -2,6 +2,7 @@
 #define VIRTIO_REMOTE
 
 #include "hw/virtio/virtio.h"
+#include "hw/virtio/vhost.h"
 #include "qemu/qemu.h"
 #include "qemu/iov.h"
 #include <sys/uio.h>
@@ -26,7 +27,8 @@ typedef struct {
     uint8_t *in_buf;
     struct iovec out_sg[1];
     struct iovec in_sg[1];
-    VirtQueueElement elem;
+    // VirtQueueElement elem;
+    void *elem;
 } RemoteVQueueCtx;
 
 // Struct to hold zero-copy data for cleanup
@@ -37,7 +39,9 @@ typedef struct {
     void *vdev;
 } zc_data;
 
-int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev);
+bool check_virtio_device_remote(VirtIODevice *vdev);
+
+int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev);
 void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 void remote_virtio_queue_host_notifier_read(EventNotifier *n);
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp);
@@ -50,4 +54,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len);
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
 
-#endif
+// vhost
+
+
+#endif /* VIRTIO_REMOTE */

@@ -1818,6 +1818,10 @@ bool vhost_virtqueue_pending(struct vhost_dev *hdev, int n)
 void vhost_virtqueue_mask(struct vhost_dev *hdev, VirtIODevice *vdev, int n,
                          bool mask)
 {
+    // cmsvm
+    if (check_virtio_device_remote(vdev))
+        return;
+
     struct VirtQueue *vvq = virtio_get_queue(vdev, n);
     int r, index = n - hdev->vq_index;
     struct vhost_vring_file file;

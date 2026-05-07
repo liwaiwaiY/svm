@@ -274,8 +274,7 @@ static bool local_qemu_post_device_realize(DeviceState *dev, char *ip_port, Erro
 static bool remote_stub_post_device_realize(DeviceState *dev, char *ip_port, Error **errp)
 {
     // open a socket to listen local connection
-    return object_property_set_str(OBJECT(dev), "remote-stub", ip_port, errp) &&
-           object_property_set_bool(OBJECT(dev->bus), "remote", true, errp);
+    return object_property_set_str(OBJECT(dev), "remote-stub", ip_port, errp);
 }
 
 bool qdev_realize_cmsvm(DeviceState *dev, BusState *bus, char* remote, Error **errp)
