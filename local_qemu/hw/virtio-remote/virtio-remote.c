@@ -712,11 +712,21 @@ void route_to_remote(VirtQueue *vq, int stub)
         msg_sg[0].iov_base = header;
         msg_sg[0].iov_len = sizeof(header);
         memcpy(msg_sg + 1, elem->out_sg, elem->out_num * sizeof(struct iovec));
+        struct msghdr msg = {
+            .msg_iov = msg_sg,
+            .msg_iovlen = elem->out_num + 1,
+        };
         sqe = io_uring_get_sqe(remote_uring);
-        io_uring_prep_send_zc(sqe, stub, msg_sg, elem->out_num + 1, 0);
+        io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(remote_uring);
         io_uring_wait_cqe(remote_uring, &cqe);
+        io_uring_cqe_seen(remote_uring, cqe);
+
+        if (cqe->flags & IORING_CQE_F_MORE) {
+            io_uring_wait_cqe(remote_uring, &cqe);
+            io_uring_cqe_seen(remote_uring, cqe);
+        }
 
         // a new resp is needed
         if (elem->in_num > 0) {
