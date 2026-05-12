@@ -204,17 +204,27 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
     resp_header[1] = ctx->elem_index;
     resp_header[2] = len;
 
-    struct iovec resp_iov[2];
-    resp_iov[0].iov_base = resp_header;
-    resp_iov[0].iov_len = sizeof(resp_header);
-    resp_iov[1].iov_base = ctx->in_buf;
-    resp_iov[1].iov_len = len;
+    struct iovec resp_iov[2] = {
+        { .iov_base = resp_header,     .iov_len = sizeof(resp_header) },
+        { .iov_base = ctx->in_buf,      .iov_len = len },
+    };
+    struct msghdr msg = {
+        .msg_iov = resp_iov,
+        .msg_iovlen = 2,
+    };
 
     sqe = io_uring_get_sqe(remote_uring);
-    io_uring_prep_send_zc(sqe, ctx->resp_fd, resp_iov, 2, 0, IORING_SEND_ZC_REPORT_USAGE);
+    io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
+    sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
     io_uring_submit(remote_uring);
+
     io_uring_wait_cqe(remote_uring, &cqe);
     io_uring_cqe_seen(remote_uring, cqe);
+
+    if (cqe->flags & IORING_CQE_F_MORE) {
+        io_uring_wait_cqe(remote_uring, &cqe);
+        io_uring_cqe_seen(remote_uring, cqe);
+    }
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
