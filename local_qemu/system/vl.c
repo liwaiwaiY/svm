@@ -2731,11 +2731,10 @@ static void qemu_init_board(void)
 }
 
 // cmsvm
-static remote_stub_create_virtio_devices(void)
+static void remote_stub_create_virtio_devices(void)
 {
-    DeviceOption *opt;
     qemu_opts_foreach(qemu_find_opts("device"),
-                      remote_stub_device_init_func, NULL, &error_fatal);
+                      device_init_func, NULL, &error_fatal);
 }
 
 static void qemu_create_cli_devices(void)
@@ -2870,7 +2869,6 @@ void qemu_init_remote_stub(int argc, char **argv)
 
     // 6. register only necessary opts for virtio backend
     qemu_add_opts(&qemu_device_opts);
-    qemu_add_opts(&qemu_virtio_opts);
 
     // 7. execute MODULE_INIT_QOM phase (register QOM types for -device)
     module_call_init(MODULE_INIT_QOM);

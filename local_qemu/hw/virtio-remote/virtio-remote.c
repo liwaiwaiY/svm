@@ -569,7 +569,7 @@ typedef struct ListenerParam {
     int stub;
 } ListenerParam;
 
-static void resp_listener(void *opaque)
+static void* resp_listener(void *opaque)
 {
     ListenerParam *param = (ListenerParam *)opaque;
     VirtIODevice *vdev = param->vdev;
@@ -663,14 +663,14 @@ listen_data:
         recved++;
     }
 
-    return;
+    return NULL;
 
 hash_err:
-    return;
+    return NULL;
 link_err:
     if (!reconnect_tcp_socket(stub) && buf) {
         g_free(buf);
-        return;
+        return NULL;
     }
     switch (phase) {
     case 0:
@@ -680,11 +680,11 @@ link_err:
     case 2:
         goto listen_data;
     default:
-        return;
+        return NULL;
     }
 elem_err:
     g_free(buf);
-    return;
+    return NULL;
 }
 
 void route_to_remote(VirtQueue *vq, int stub)
