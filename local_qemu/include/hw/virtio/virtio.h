@@ -253,6 +253,8 @@ void virtqueue_call_handle_output(VirtQueue *vq);
 const char *virtqueue_get_vdev_name(VirtQueue *vq);
 hwaddr virtqueue_get_vring_desc(VirtQueue *vq);
 EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq);
+VirtIODevice *virtqueue_get_vdev(VirtQueue *vq);
+VirtQueue *host_notifier_to_vq(EventNotifier *n);
 
 void virtio_instance_init_common(Object *proxy_obj, void *data,
                                  size_t vdev_size, const char *vdev_name);

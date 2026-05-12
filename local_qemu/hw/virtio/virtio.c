@@ -228,6 +228,11 @@ const char* virtqueue_get_vdev_name(VirtQueue *vq)
     return vq->vdev->name;
 }
 
+VirtIODevice *virtqueue_get_vdev(VirtQueue *vq)
+{
+    return vq->vdev;
+}
+
 hwaddr virtqueue_get_vring_desc(VirtQueue *vq)
 {
     return vq->vring.desc;
@@ -237,6 +242,12 @@ EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq)
 {
     return &vq->host_notifier;
 }
+
+VirtQueue *host_notifier_to_vq(EventNotifier *n)
+{
+    return container_of(n, VirtQueue, host_notifier);
+}
+
 
 static const char *virtio_id_to_name(uint16_t device_id)
 {
