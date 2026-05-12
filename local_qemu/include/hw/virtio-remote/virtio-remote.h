@@ -3,8 +3,7 @@
 
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/vhost.h"
-#include "qemu/qemu.h"
-#include "qemu/iov.h"
+#include "qemu/osdep.h"
 #include <sys/uio.h>
 #include <liburing.h>
 #include <glib.h>
@@ -14,7 +13,11 @@
 #include <string.h>
 #include <stdlib.h>
 
-typedef struct {
+typedef struct VirtQueue VirtQueue;
+typedef struct VirtIODevice VirtIODevice;
+typedef struct VirtQueueElement VirtQueueElement;
+
+typedef struct RemoteVQueueCtx {
     int resp_fd;
     int vq_nr;
     unsigned int elem_index;
@@ -50,16 +53,6 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len);
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
-
-inline void virtio_remote_ctx_free(VirtQueue *vq) {
-    if (vdev->vq.remote_ctx) {
-        RemoteVQueueCtx *ctx = vdev->vq.remote_ctx;
-        g_free(ctx->out_buf);
-        g_free(ctx->in_buf);
-        g_free(ctx);
-        vdev->vq.remote_ctx = NULL;
-    }
-};
 
 // vhost
 

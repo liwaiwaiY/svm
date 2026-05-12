@@ -2,7 +2,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-virtio.h"
-#include "trace.h"
+// #include "trace.h"
 #include "qemu/defer-call.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
@@ -22,7 +22,7 @@
 #include "system/iothread.h"
 #include "system/memory.h"
 #include "system/runstate.h"
-#include "virtio-qmp.h"
+// #include "virtio-qmp.h"
 
 #include "standard-headers/linux/virtio_ids.h"
 #include "standard-headers/linux/vhost_types.h"
@@ -94,7 +94,7 @@ static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
     if (vq_nr < 0 || vq_nr >= VIRTIO_QUEUE_MAX) {
         return NULL;
     }
-    return &vdev->vq[vq_nr];
+    return virtio_get_queue(vdev, vq_nr);
 }
 
 static gpointer make_elem_key(int vq_nr, unsigned int index)
@@ -108,7 +108,7 @@ int remote_uring_init(bool remote_stub)
         gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
     }
     gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
-    int ret = io_uring_queue_init(IO_URING_DEPTH, &remote_uring, 0);
+    int ret = io_uring_queue_init(IO_URING_DEPTH, remote_uring, 0);
     if (ret < 0) {
         fprintf(stderr, "io_uring init failed\n");
         return -1;
@@ -117,7 +117,7 @@ int remote_uring_init(bool remote_stub)
 }
 
 // socket reconnect
-int reconnect_tcp_socket(int fd)
+static int reconnect_tcp_socket(int fd)
 {
     // cmsvmTODO v2
     return 0;
@@ -165,11 +165,12 @@ static void *remote_stub_virtqueue_alloc_element(size_t sz, unsigned out_num, un
 
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
-    RemoteVQueueCtx *ctx = vq->remote_ctx;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     // int out_num = ctx->out_num, in_num = ctx->in_num;
     int out_num = 1, in_num = 1; // todocmsvm v2: add sg_table
+    int i = 0;
     VirtQueueElement *ret = remote_stub_virtqueue_alloc_element(sz, out_num, in_num);
-    ret->index = ctx->index;
+    ret->index = ctx->elem_index;
     ret->ndescs = 1;
     ret->in_order_filled = false;
     ret->len = 0;
@@ -194,7 +195,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len)
 {
-    RemoteVQueueCtx *ctx = vq->remote_ctx;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     int resp_header[3];
@@ -210,7 +211,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
     resp_iov[1].iov_len = len;
 
     sqe = io_uring_get_sqe(remote_uring);
-    io_uring_prep_send_zc(sqe, ctx->resp_fd, resp_iov, 2, 0);
+    io_uring_prep_send_zc(sqe, ctx->resp_fd, resp_iov, 2, 0, IORING_SEND_ZC_REPORT_USAGE);
     io_uring_submit(remote_uring);
     io_uring_wait_cqe(remote_uring, &cqe);
     io_uring_cqe_seen(remote_uring, cqe);
@@ -223,7 +224,7 @@ bool remote_virtio_notify_skip(VirtIODevice *vdev)
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        if (vdev->vq[n].remote_ctx) {
+        if (virtqueue_get_remote_ctx(virtio_get_queue(vdev, n))) {
             return true;
         }
     }
@@ -360,7 +361,7 @@ static void remote_stub_read_handler(void *opaque)
         return;
     }
 
-    RemoteVQueueCtx *ctx = vq->remote_ctx;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
 
     ctx->resp_fd = fd;
     ctx->vq_nr = vq_nr;
@@ -389,7 +390,8 @@ static void remote_stub_read_handler(void *opaque)
     *  virtqueue_push(...);    or     virtqueue_fill(); virtqueue_flush();
     *  g_free(elem);
     */
-    vq->handle_output(vdev, vq);
+
+    virtqueue_call_handle_output(vq);
 
     // early free
     g_free(out_buf);
@@ -499,7 +501,7 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port, Error **er
             continue;
         }
         RemoteVQueueCtx *ctx = g_new0(RemoteVQueueCtx, 1);
-        vdev->vq[n].remote_ctx = ctx;
+        virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
     }
 
     g_hash_table_insert(gsi_stubs, vdev->name, GUINT_TO_POINTER(listen_fd));
@@ -532,10 +534,10 @@ void close_remote_virtio_device_sockets(VirtIODevice *vdev)
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        RemoteVQueueCtx *ctx = vdev->vq[n].remote_ctx;
-        if (ctx) {
-            g_free(ctx);
-            vdev->vq[n].remote_ctx = NULL;
+        RemoteVQueueCtx *remote_ctx = virtqueue_get_remote_ctx(virtio_get_queue(vdev, n));
+        if (remote_ctx) {
+            g_free(remote_ctx);
+            virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), NULL);
         }
     }
 }
@@ -667,8 +669,8 @@ void route_to_remote(VirtQueue *vq, int stub)
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
-    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vq->vdev->name);
-    int vq_nr = vq - vq->vdev->vq;
+    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, virtqueue_get_vdev_name(vq));
+    int vq_nr = vq - virtio_get_queue(virtqueue_get_vdev(vq), 0);
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
@@ -706,17 +708,17 @@ void route_to_remote(VirtQueue *vq, int stub)
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 {
-    if (vq->vring.desc) {
+    if (virtqueue_get_vring_desc(vq)) {
         sent = 0;
         recved = 0;
-        VirtIODevice *vdev = vq->vdev;
+        VirtIODevice *vdev = virtqueue_get_vdev(vq);
         int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
 
         if (unlikely(vdev->broken)) {
             return;
         }
 
-        trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
+        // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         sending = true;
         QemuThread listener;
         ListenerParam *param = g_new0(ListenerParam, 1);
@@ -747,7 +749,7 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
     }
 }
 
-int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
+int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
         GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -759,7 +761,7 @@ int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
 
     memory_region_transaction_begin();
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = &vdev->vq[n];
+        VirtQueue *vq = virtio_get_queue(vdev, n);
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
@@ -769,17 +771,17 @@ int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
             goto assign_error;
         }
         // avoid wild pointer
-        vq->remote_ctx = NULL;
-        event_notifier_set_handler(&vq->host_notifier,
+        virtqueue_set_remote_ctx(vq, NULL);
+        event_notifier_set_handler(virtqueue_get_host_notifier(vq),
                                    remote_virtio_queue_host_notifier_read);
     }
 
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = &vdev->vq[n];
-        if (!vq->vring.num) {
+        VirtQueue *vq = virtio_get_queue(vdev, n);
+        if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        event_notifier_set(&vq->host_notifier);
+        event_notifier_set(virtqueue_get_host_notifier(vq));
     }
 
     memory_region_transaction_commit();
@@ -788,12 +790,12 @@ int remote_virtio_device_start_ioeventfd_impl(VirtioDevice *vdev)
 assign_error:
     i = n; /* save n for a second iteration after transaction is committed. */
     while (--n >= 0) {
-        VirtQueue *vq = &vdev->vq[n];
+        VirtQueue *vq = virtio_get_queue(vdev, n);
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
 
-        event_notifier_set_handler(&vq->host_notifier, NULL);
+        event_notifier_set_handler(virtqueue_get_host_notifier(vq), NULL);
         r = virtio_bus_set_host_notifier(qbus, n, false);
         assert(r >= 0);
     }
@@ -823,12 +825,12 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
      */
     memory_region_transaction_begin();
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = &vdev->vq[n];
+        VirtQueue *vq = virtio_get_queue(vdev, n);
 
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        event_notifier_set_handler(&vq->host_notifier, NULL);
+        event_notifier_set_handler(virtqueue_get_host_notifier(vq), NULL);
         r = virtio_bus_set_host_notifier(qbus, n, false);
         assert(r >= 0);
     }

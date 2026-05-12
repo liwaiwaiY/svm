@@ -246,6 +246,14 @@ struct VirtioDeviceClass {
     void (*toggle_device_iotlb)(VirtIODevice *vdev);
 };
 
+// cmsvm
+void virtqueue_set_remote_ctx(VirtQueue *vq, void *ctx);
+void *virtqueue_get_remote_ctx(VirtQueue *vq);
+void virtqueue_call_handle_output(VirtQueue *vq);
+const char *virtqueue_get_vdev_name(VirtQueue *vq);
+hwaddr virtqueue_get_vring_desc(VirtQueue *vq);
+EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq);
+
 void virtio_instance_init_common(Object *proxy_obj, void *data,
                                  size_t vdev_size, const char *vdev_name);
 

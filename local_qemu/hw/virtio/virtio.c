@@ -205,6 +205,39 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_SPI] = "virtio-spi"
 };
 
+// cmsvm
+void virtqueue_set_remote_ctx(VirtQueue *vq, void *ctx)
+{
+    vq->remote_ctx = ctx;
+}
+
+void* virtqueue_get_remote_ctx(VirtQueue *vq)
+{
+    return vq->remote_ctx;
+}
+
+void virtqueue_call_handle_output(VirtQueue *vq)
+{
+    if (vq->handle_output) {
+        vq->handle_output(vq->vdev, vq);
+    }
+}
+
+const char* virtqueue_get_vdev_name(VirtQueue *vq)
+{
+    return vq->vdev->name;
+}
+
+hwaddr virtqueue_get_vring_desc(VirtQueue *vq)
+{
+    return vq->vring.desc;
+}
+
+EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq)
+{
+    return &vq->host_notifier;
+}
+
 static const char *virtio_id_to_name(uint16_t device_id)
 {
     assert(device_id < G_N_ELEMENTS(virtio_device_names));
@@ -2614,7 +2647,14 @@ void virtio_delete_queue(VirtQueue *vq)
     vq->vring.num_default = 0;
     vq->handle_output = NULL;
     // cmsvm
-    virtio_remote_ctx_free(vq);
+    // virtio_remote_ctx_free(vq);
+    if (vq->remote_ctx) {
+        RemoteVQueueCtx *remote_ctx = vq->remote_ctx;
+        g_free(remote_ctx->out_buf);
+        g_free(remote_ctx->in_buf);
+        g_free(remote_ctx);
+        vq->remote_ctx = NULL;
+    }
     g_free(vq->used_elems);
     vq->used_elems = NULL;
     virtio_virtqueue_reset_region_cache(vq);
@@ -3958,7 +3998,8 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     }
 
     // cmsvm
-    void (*virtio_queue_host_notifier_read)(EventNotifier *n) cb = NULL;
+    void (*cb)(EventNotifier *n);
+    cb = NULL;
     if (unlikely(check_virtio_device_remote(vq->vdev))) {
         cb = remote_virtio_queue_host_notifier_read;
     } else {
@@ -4159,7 +4200,14 @@ static void virtio_device_free_virtqueues(VirtIODevice *vdev)
             break;
         }
         // cmsvm
-        virtio_remote_ctx_free(vdev->vq[i]);
+        // virtio_remote_ctx_free(vdev->vq[i]);
+        if (vdev->vq[i].remote_ctx) {
+            RemoteVQueueCtx *remote_ctx = vdev->vq[i].remote_ctx;
+            g_free(remote_ctx->out_buf);
+            g_free(remote_ctx->in_buf);
+            g_free(remote_ctx);
+            vdev->vq[i].remote_ctx = NULL;
+        }
         virtio_virtqueue_reset_region_cache(&vdev->vq[i]);
     }
     g_free(vdev->vq);
@@ -4319,7 +4367,7 @@ static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, E
 }
 
 // cmsvm
-static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error *errp)
+static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error **errp)
 {
     remote_uring_init(true);
     init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
@@ -4338,11 +4386,11 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
     // cmsvm
-    object_class_property_add_bool(vdc, "remote-virtio",
+    object_class_property_add_bool(klass, "remote-virtio",
                                   NULL, virtio_device_set_remote_virtio);
-    object_class_property_add_str(vdc, "remote-machine",
+    object_class_property_add_str(klass, "remote-machine",
                                   NULL, virtio_device_set_remote_machine);
-    object_class_property_add_str(vdc, "remote-stub",
+    object_class_property_add_str(klass, "remote-stub",
                                   NULL, virtio_device_set_remote_stub);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
