@@ -123,7 +123,7 @@ int remote_uring_init(bool remote_stub)
     if (!remote_stub) { // local_qemu
         gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
     }
-    gsi_stubs = g_hash_table_new(g_direct_hash, g_direct_equal);
+    gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
     int ret = io_uring_queue_init(IO_URING_DEPTH, remote_uring, 0);
     if (ret < 0) {
         fprintf(stderr, "io_uring init failed\n");
@@ -303,9 +303,7 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     }
     // long-term usage (kernel automatically send hearbeats)
     enable_tcp_keepalive(fd);
-    char *vdev_name = g_new0(char, strlen(vdev->name) + 1);
-    strcpy(vdev_name, vdev->name);
-    g_hash_table_insert(gsi_stubs, vdev_name, GUINT_TO_POINTER(fd));
+    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(fd));
     return;
 
 err_connect:
@@ -485,9 +483,7 @@ static void remote_stub_accept_handler(void *opaque)
     g_hash_table_remove(gsi_stubs, vdev->name);
     close(listen_fd);
     enable_tcp_keepalive(fd);
-    char *vdev_name = g_new0(char, strlen(vdev->name) + 1);
-    strcpy(vdev_name, vdev->name);
-    g_hash_table_insert(gsi_stubs, vdev_name, GUINT_TO_POINTER(fd));
+    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(fd));
 
     qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
     force_printf("connected for dev %s", vdev->name);
@@ -539,9 +535,7 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
         virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
     }
 
-    char *vdev_name = g_new0(char, strlen(vdev->name) + 1);
-    strcpy(vdev_name, vdev->name);
-    g_hash_table_insert(gsi_stubs, vdev_name, GUINT_TO_POINTER(listen_fd));
+    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(listen_fd));
     /*
     *  we think it is okay to put the listen resp in main-loop, as the local_qemu can only
     *  connect server after remote_stub is started.
@@ -553,7 +547,6 @@ static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 {
     // gsi_stubs
     if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
-        g_free(g_hash_table_lookup(gsi_stubs, vdev->name));
         g_hash_table_remove(gsi_stubs, vdev->name);
     }
     // gsi_elems
