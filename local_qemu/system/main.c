@@ -59,7 +59,7 @@ static void *remote_stub_main(void *opaque)
 {
     int status;
     bql_lock();
-    status = remote_stub_main_loop();
+    status = remote_stub_loop();
     bql_unlock();
     exit(status);
 }
