@@ -142,6 +142,12 @@
 #include "qemu/guest-random.h"
 #include "qemu/keyval.h"
 
+// cmsvm
+#include "system/memory.h"
+#include "system/address-spaces.h"
+#include "hw/core/sysbus.h"
+#include "hw/pci-host/remote.h"
+
 #define MAX_VIRTIO_CONSOLES 1
 
 typedef struct BlockdevOptionsQueueEntry {
@@ -3712,6 +3718,23 @@ void qemu_init_remote_stub(int argc, char **argv)
     if (qemu_init_main_loop(&err) < 0) {
         error_reportf_err(err, "failed to initialize main loop: ");
         exit(1);
+    }
+
+    // minimal PCIe root bus for remote-stub virtio-pci devices
+    // TYPE_REMOTE_PCIHOST is designed for device-only processes,
+    // no ECAM/MMIO/PIO needed (the guest never sees this host bridge)
+    cpu_exec_init_all();
+    {
+        MemoryRegion *pci_mem = g_new(MemoryRegion, 1);
+        memory_region_init(pci_mem, NULL, "pci", UINT64_MAX);
+
+        RemotePCIHost *host = REMOTE_PCIHOST(qdev_new(TYPE_REMOTE_PCIHOST));
+        host->mr_pci_mem = pci_mem;
+        host->mr_sys_mem = get_system_memory();
+        host->mr_sys_io   = get_system_io();
+
+        qdev_realize_and_unref(DEVICE(host), sysbus_get_default(),
+                               &error_fatal);
     }
 
     remote_stub_create_virtio_devices();
