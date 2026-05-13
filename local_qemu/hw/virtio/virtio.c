@@ -4363,16 +4363,11 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
 }
 
 // cmsvm
-static void virtio_device_set_remote_virtio(Object *obj, bool value, Error **errp)
+static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
 {
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
     vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
-}
-
-// cmsvm
-static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
-{
     remote_uring_init(false);
     init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
 }
@@ -4397,8 +4392,6 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
     // cmsvm
-    object_class_property_add_bool(klass, "remote-virtio",
-                                  NULL, virtio_device_set_remote_virtio);
     object_class_property_add_str(klass, "remote-machine",
                                   NULL, virtio_device_set_remote_machine);
     object_class_property_add_str(klass, "remote-stub",

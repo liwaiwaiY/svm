@@ -646,8 +646,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    // cmsvm option is ip_port: "xxx.xxx.xxx.xxx@xxxx"
-    const char *driver, *path, *remote;
+    const char *driver, *path;
     char *id;
     DeviceState *dev;
     BusState *bus = NULL;
@@ -658,8 +657,6 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         error_setg(errp, QERR_MISSING_PARAMETER, "driver");
         return NULL;
     }
-
-    remote = qdict_get_try_str(opts, "remote");
 
     /* find driver */
     dc = qdev_get_device_class(&driver, errp);
@@ -724,9 +721,8 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     qdict_del(properties, "driver");
     qdict_del(properties, "bus");
     qdict_del(properties, "id");
-    // cmsvm
-    qdict_del(properties, "remote");
-
+    // cmsvm: we add remote-machine(loca_qemu), remote-stub
+    // remote-machine=127.0.0.1@8080, remote-stub=8080
     object_set_properties_from_keyval(&dev->parent_obj, properties, from_json,
                                       errp);
     qobject_unref(properties);
@@ -734,9 +730,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         goto err_del_dev;
     }
 
-    // cmsvm
-    if ((remote && !qdev_realize_cmsvm(dev, bus, remote, errp)) ||
-        !qdev_realize(dev, bus, errp)) {
+    if (!qdev_realize(dev, bus, errp)) {
         goto err_del_dev;
     }
 

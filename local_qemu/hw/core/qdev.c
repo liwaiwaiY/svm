@@ -261,29 +261,6 @@ static void device_reset_child_foreach(Object *obj, ResettableChildCallback cb,
     }
 }
 
-// cmsvm
-static bool local_qemu_post_device_realize(DeviceState *dev, char *ip_port, Error **errp)
-{
-    // if remote is nullptr, it has to be stub
-    return ip_port[0] != '@' &&
-           object_property_set_bool(OBJECT(dev), "remote-virtio", true, errp) &&
-           object_property_set_str(OBJECT(dev), "remote-machine", ip_port, errp);
-}
-
-// cmsvm
-static bool remote_stub_post_device_realize(DeviceState *dev, char *ip_port, Error **errp)
-{
-    // open a socket to listen local connection
-    return object_property_set_str(OBJECT(dev), "remote-stub", ip_port, errp);
-}
-
-bool qdev_realize_cmsvm(DeviceState *dev, BusState *bus, char* remote, Error **errp)
-{
-    return qdev_realize(dev, bus, errp) &&
-           (local_qemu_post_device_realize(dev, remote, errp) ||
-           remote_stub_post_device_realize(dev, remote, errp));
-}
-
 bool qdev_realize(DeviceState *dev, BusState *bus, Error **errp)
 {
     assert(!dev->realized && !dev->parent_bus);

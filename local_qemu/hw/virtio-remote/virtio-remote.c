@@ -77,7 +77,8 @@ GHashTable *gsi_tables = NULL;
 extern VirtQueueElement* virtqueue_split_pop(VirtQueue* vq, size_t sz);
 extern VirtQueueElement* virtqueue_packed_pop(VirtQueue* vq, size_t sz);
 
-static struct io_uring *remote_uring = NULL;
+static struct io_uring remote_uring_data;
+static struct io_uring *remote_uring = &remote_uring_data;
 static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  rw_cond = PTHREAD_COND_INITIALIZER;
 
@@ -467,16 +468,9 @@ static void remote_stub_accept_handler(void *opaque)
     qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
 }
 
-void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port, Error **errp)
+void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
 {
-    int port;
-    /* if remote_stub, need configure port with "@xxxx" */
-    const char *at_pos = ip_port + 1;
-    if (!at_pos) {
-        error_setg(errp, "invalid ip_port format, expected ip@port");
-        return;
-    }
-    port = atoi(at_pos + 1);
+    int port = atoi(str_port);
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -687,7 +681,7 @@ elem_err:
     return NULL;
 }
 
-void route_to_remote(VirtQueue *vq, int stub)
+static void route_to_remote(VirtQueue *vq, int stub)
 {
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
@@ -697,7 +691,7 @@ void route_to_remote(VirtQueue *vq, int stub)
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
-        struct iovec msg_sg[elem->out_num + 1];
+        struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
         int header[4];
         header[0] = vq_nr;
         header[1] = elem->index;
@@ -727,6 +721,8 @@ void route_to_remote(VirtQueue *vq, int stub)
             io_uring_wait_cqe(remote_uring, &cqe);
             io_uring_cqe_seen(remote_uring, cqe);
         }
+
+        g_free(msg_sg);
 
         // a new resp is needed
         if (elem->in_num > 0) {
@@ -885,7 +881,6 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
     // need to close sockets
     close_remote_virtio_device_sockets(vdev);
     remote_device_clean_up_hash_table(vdev);
-    // todocmsvm: need to free heap mem
 }
 
 // -------------- vhost --------------

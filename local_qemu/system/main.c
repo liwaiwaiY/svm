@@ -68,15 +68,11 @@ int (*qemu_main)(void) = os_darwin_cfrunloop_main;
 
 int main(int argc, char **argv)
 {
-    printf("%s\n", argv[0]);
-    fflush(stdout);
     // cmsvm: consume the first argv to test mode "local_qemu" or "remote_stub"
-    if (strstr(argv[0], "remote-stub"))
+    if (strstr(argv[0], "remote-stub")){
         // cmsvmtodo2
         qemu_init_remote_stub(argc, argv);
-        printf("qemu_init_remote_stub\n");
-        fflush(stdout);
-    else
+    } else
         qemu_init(argc, argv);
 
     // qemu_init(argc, argv);
