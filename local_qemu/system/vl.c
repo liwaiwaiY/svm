@@ -90,6 +90,8 @@
 #include "qemu/audio.h"
 #include "system/cpus.h"
 #include "system/cpu-timers.h"
+#include "system/address-spaces.h"
+#include "hw/remote/machine.h"
 #include "exec/icount.h"
 #include "migration/colo.h"
 #include "migration/postcopy-ram.h"
@@ -3720,22 +3722,20 @@ void qemu_init_remote_stub(int argc, char **argv)
         exit(1);
     }
 
-    // minimal PCIe root bus for remote-stub virtio-pci devices
-    // TYPE_REMOTE_PCIHOST is designed for device-only processes,
-    // no ECAM/MMIO/PIO needed (the guest never sees this host bridge)
+    // cmsvm: use x-remote-machine for PCIe root bus
+    // memory_map_init() creates system_memory and system_io,
+    // then machine_run_board_init() -> remote_machine_init()
+    // creates the PCI host bridge and PCIe root bus
+    current_machine = MACHINE(object_new(TYPE_REMOTE_MACHINE));
+    object_property_add_child(object_get_root(), "machine",
+                              OBJECT(current_machine));
+    qemu_create_machine_containers(OBJECT(current_machine));
+    object_property_add_child(machine_get_container("unattached"),
+                              "sysbus", OBJECT(sysbus_get_default()));
+
+    machine_run_board_init(current_machine, NULL, &error_fatal);
+    qdev_machine_creation_done();
     cpu_exec_init_all();
-    {
-        MemoryRegion *pci_mem = g_new(MemoryRegion, 1);
-        memory_region_init(pci_mem, NULL, "pci", UINT64_MAX);
-
-        RemotePCIHost *host = REMOTE_PCIHOST(qdev_new(TYPE_REMOTE_PCIHOST));
-        host->mr_pci_mem = pci_mem;
-        host->mr_sys_mem = get_system_memory();
-        host->mr_sys_io   = get_system_io();
-
-        qdev_realize_and_unref(DEVICE(host), sysbus_get_default(),
-                               &error_fatal);
-    }
 
     remote_stub_create_virtio_devices();
 }
