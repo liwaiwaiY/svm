@@ -646,7 +646,8 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    const char *driver, *path;
+    const char *driver, *path, *remote;
+    int stub = 0;
     char *id;
     DeviceState *dev;
     BusState *bus = NULL;
@@ -717,12 +718,20 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     }
 
     /* set properties */
+    remote = qdict_get_try_str(opts, "remote-machine");
+    if (!remote) {
+        remote = qdict_get_try_str(opts, "remote-stub");
+        stub = 1;
+    }
     properties = qdict_clone_shallow(opts);
     qdict_del(properties, "driver");
     qdict_del(properties, "bus");
     qdict_del(properties, "id");
+    qdict_del(properties, "remote-machine");
+    qdict_del(properties, "remote-stub");
     // cmsvm: we add remote-machine(loca_qemu), remote-stub
     // remote-machine=127.0.0.1@8080, remote-stub=8080
+    // but we need to delay to set after vq is allocated
     object_set_properties_from_keyval(&dev->parent_obj, properties, from_json,
                                       errp);
     qobject_unref(properties);
@@ -733,6 +742,16 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
     if (!qdev_realize(dev, bus, errp)) {
         goto err_del_dev;
     }
+
+    if (!remote && stub == 0) {
+        object_property_set_str(&dev->parent_obj, "remote-machine", remote, errp);
+    } else if (!remote && stub == 1) {
+        object_property_set_str(&dev->parent_obj, "remote-stub", remote, errp);
+    }
+    if (*errp) {
+        goto err_del_dev;
+    }
+
 
     return dev;
 

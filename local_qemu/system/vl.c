@@ -3731,7 +3731,6 @@ void qemu_init_remote_stub(int argc, char **argv)
     cpu_exec_init_all();
     MachineClass *mc = MACHINE_GET_CLASS(current_machine);
     mc->init(current_machine);
-    qdev_machine_creation_done();
 
     remote_stub_create_virtio_devices();
 }
