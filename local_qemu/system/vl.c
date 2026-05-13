@@ -3702,6 +3702,7 @@ void qemu_init_remote_stub(int argc, char **argv)
     qemu_add_opts(&qemu_device_opts);
     qemu_add_run_with_opts();
     module_call_init(MODULE_INIT_OPTS);
+    module_call_init(MODULE_INIT_QOM);
 
     qemu_remote_stub_process_options(argc, argv);
 
