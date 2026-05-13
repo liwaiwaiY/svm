@@ -743,9 +743,9 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         goto err_del_dev;
     }
 
-    if (!remote && stub == 0) {
+    if (remote && stub == 0) {
         object_property_set_str(&dev->parent_obj, "remote-machine", remote, errp);
-    } else if (!remote && stub == 1) {
+    } else if (remote && stub == 1) {
         object_property_set_str(&dev->parent_obj, "remote-stub", remote, errp);
     }
     if (*errp) {
