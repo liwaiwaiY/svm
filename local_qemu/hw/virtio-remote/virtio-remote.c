@@ -919,9 +919,4 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
     remote_device_clean_up_hash_table(vdev);
 }
 
-bool remote_stub_loop_should_exit(int *status)
-{
-    return gsi_stubs && g_hash_table_size(gsi_stubs) > 0;
-}
-
 // -------------- vhost --------------

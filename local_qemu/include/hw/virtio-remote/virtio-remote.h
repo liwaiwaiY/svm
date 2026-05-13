@@ -50,12 +50,9 @@ int remote_uring_init(bool remote_stub);
 void remote_virtio_pci_notify(DeviceState *dev, uint16_t vector);
 
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
-void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
-                                unsigned int len);
+void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len);
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
 
-
-bool remote_stub_loop_should_exit(int *status);
 // vhost
 
 

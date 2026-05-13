@@ -63,9 +63,6 @@
 #include "system/tpm.h"
 #include "trace.h"
 
-//cmsvm
-#include "hw/virtio-remote/virtio-remote.h"
-
 static NotifierList exit_notifiers =
     NOTIFIER_LIST_INITIALIZER(exit_notifiers);
 
@@ -949,6 +946,11 @@ int qemu_main_loop(void)
     }
 
     return status;
+}
+
+static bool remote_stub_loop_should_exit(int *status)
+{
+    return false;
 }
 
 int remote_stub_loop(void)
