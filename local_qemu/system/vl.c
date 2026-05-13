@@ -3722,20 +3722,16 @@ void qemu_init_remote_stub(int argc, char **argv)
         exit(1);
     }
 
-    // cmsvm: use x-remote-machine for PCIe root bus
-    // memory_map_init() creates system_memory and system_io,
-    // then machine_run_board_init() -> remote_machine_init()
-    // creates the PCI host bridge and PCIe root bus
     current_machine = MACHINE(object_new(TYPE_REMOTE_MACHINE));
     object_property_add_child(object_get_root(), "machine",
                               OBJECT(current_machine));
     qemu_create_machine_containers(OBJECT(current_machine));
     object_property_add_child(machine_get_container("unattached"),
                               "sysbus", OBJECT(sysbus_get_default()));
-
-    machine_run_board_init(current_machine, NULL, &error_fatal);
-    qdev_machine_creation_done();
     cpu_exec_init_all();
+    MachineClass *mc = MACHINE_GET_CLASS(current_machine);
+    mc->init(current_machine);
+    qdev_machine_creation_done();
 
     remote_stub_create_virtio_devices();
 }
