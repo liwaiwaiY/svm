@@ -87,9 +87,6 @@ GHashTable *gsi_tables = NULL;
 */
 // GHashTable *gsi_elems = NULL;
 
-extern VirtQueueElement* virtqueue_split_pop(VirtQueue* vq, size_t sz);
-extern VirtQueueElement* virtqueue_packed_pop(VirtQueue* vq, size_t sz);
-
 static struct io_uring remote_uring_data;
 static struct io_uring *remote_uring = &remote_uring_data;
 static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -182,6 +179,9 @@ static void *remote_stub_virtqueue_alloc_element(size_t sz, unsigned out_num, un
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    if (ctx->elem) // handled once
+        return NULL;
+
     // int out_num = ctx->out_num, in_num = ctx->in_num;
     int out_num = 1, in_num = 1; // todocmsvm v2: add sg_table
     int i = 0;
@@ -211,6 +211,8 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
     force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_name(vq));
+    if (len == 0)
+        return;
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     struct io_uring_sqe *sqe;
@@ -402,7 +404,7 @@ static void remote_stub_read_handler(void *opaque)
     ctx->in_len = in_len;
     ctx->out_buf = out_buf;
     ctx->in_buf = g_new0(uint8_t, in_len);
-    if (!ctx->in_buf) {
+    if (in_len > 0 && !ctx->in_buf) {
         g_free(out_buf);
         return;
     }
@@ -689,8 +691,9 @@ listen_data:
 hash_err:
     return NULL;
 link_err:
-    if (!reconnect_tcp_socket(stub) && buf) {
-        g_free(buf);
+    if (!reconnect_tcp_socket(stub)) {
+        if (buf)
+            g_free(buf);
         return NULL;
     }
     switch (phase) {
@@ -914,6 +917,11 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
     // need to close sockets
     close_remote_virtio_device_sockets(vdev);
     remote_device_clean_up_hash_table(vdev);
+}
+
+bool remote_stub_loop_should_exit(int *status)
+{
+    return gsi_stubs && g_hash_table_size(gsi_stubs) > 0;
 }
 
 // -------------- vhost --------------

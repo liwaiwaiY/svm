@@ -54,6 +54,8 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len);
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
 
+
+bool remote_stub_loop_should_exit(int *status);
 // vhost
 
 

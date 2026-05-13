@@ -63,6 +63,9 @@
 #include "system/tpm.h"
 #include "trace.h"
 
+//cmsvm
+#include "hw/virtio-remote/virtio-remote.h"
+
 static NotifierList exit_notifiers =
     NOTIFIER_LIST_INITIALIZER(exit_notifiers);
 
@@ -952,7 +955,7 @@ int remote_stub_loop(void)
 {
     int status = EXIT_SUCCESS;
 
-    for (;;) {
+    while (!remote_stub_loop_should_exit(&status)) {
         main_loop_wait(false);
     }
 
