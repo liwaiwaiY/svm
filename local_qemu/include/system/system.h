@@ -109,6 +109,8 @@ void qemu_init(int argc, char **argv);
 // cmsvm
 void qemu_init_remote_stub(int argc, char **argv);
 int qemu_main_loop(void);
+// cmsvm
+int remote_stub_loop(void);
 void qemu_cleanup(int);
 
 extern QemuOptsList qemu_legacy_drive_opts;

@@ -55,6 +55,15 @@ static void *qemu_default_main(void *opaque)
     exit(status);
 }
 
+static void *remote_stub_main(void *opaque)
+{
+    int status;
+    bql_lock();
+    status = remote_stub_main_loop();
+    bql_unlock();
+    exit(status);
+}
+
 int (*qemu_main)(void);
 
 #ifdef CONFIG_DARWIN
@@ -68,10 +77,11 @@ int (*qemu_main)(void) = os_darwin_cfrunloop_main;
 
 int main(int argc, char **argv)
 {
+    int stub = 0;
     // cmsvm: consume the first argv to test mode "local_qemu" or "remote_stub"
-    if (strstr(argv[0], "remote-stub")){
-        // cmsvmtodo2
+    if (strstr(argv[0], "remote-stub")){ 
         qemu_init_remote_stub(argc, argv);
+        stub = 1;
     } else
         qemu_init(argc, argv);
 
@@ -96,6 +106,8 @@ int main(int argc, char **argv)
         qemu_thread_create(&main_loop_thread, "qemu_main",
                            qemu_default_main, NULL, QEMU_THREAD_DETACHED);
         return qemu_main();
+    } else if (stub == 1) {
+        remote_stub_main(NULL);
     } else {
         qemu_default_main(NULL);
         g_assert_not_reached();

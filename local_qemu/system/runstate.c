@@ -948,6 +948,17 @@ int qemu_main_loop(void)
     return status;
 }
 
+int remote_stub_loop(void)
+{
+    int status = EXIT_SUCCESS;
+
+    for (;;) {
+        main_loop_wait(false);
+    }
+
+    return status;
+}
+
 void qemu_add_exit_notifier(Notifier *notify)
 {
     notifier_list_add(&exit_notifiers, notify);
