@@ -2858,12 +2858,12 @@ void qmp_x_exit_preconfig(Error **errp)
 // no vcpu, no machine, no board initialization
 void qemu_init_remote_stub(int argc, char **argv)
 {
-    const char *xmachine = "-machine x-remote-machine";
-    char *argv_buf = g_new0(char*, argc + 1);
+    char *argv_buf[argc + 2];
     argv_buf[0] = argv[0];
-    argv_buf[1] = machine;
-    memcpy(argv_buf + 2, argv + 1, argc - 1);
-    qemu_init(argc + 1, argv_buf);
+    argv_buf[1] = (char *)"-machine";
+    argv_buf[2] = (char *)"x-remote-machine";
+    memcpy(argv_buf + 3, argv + 1, (argc - 1) * sizeof(char *));
+    qemu_init(argc + 2, argv_buf);
     // Error *err = NULL;
     // error_init(argv[0]);
     // qemu_init_exec_dir(argv[0]);
