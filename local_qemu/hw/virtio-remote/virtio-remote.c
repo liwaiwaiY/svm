@@ -97,6 +97,8 @@ static bool sending = false;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
+    if (gsi_stubs == NULL)
+        return false;
     return g_hash_table_contains(gsi_stubs, vdev->name);
 }
 
