@@ -98,8 +98,6 @@ static atomic_bool sending;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
-    if (gsi_stubs == NULL)
-        return false;
     return g_hash_table_contains(gsi_stubs, vdev->name);
 }
 
@@ -703,7 +701,17 @@ listen_data:
         virtqueue_push(vq, elem, elem->len);
         // notify guest_notifiers or msix-write
         force_printf("[resp_listener] notify vq [%d]", vq_nr);
+
+        force_printf("[resp listner tmp debugger] vdev[%s] by checking is [%s]",
+                     virtqueue_get_vdev_name(vq),
+                     check_virtio_device_remote(virtqueue_get_vdev(vq)) ? "remote" : "local");
+
         virtio_notify(virtqueue_get_vdev(vq), vq);
+
+        force_printf("[resp listner tmp debugger] vdev[%s] by checking is [%s]",
+                     virtqueue_get_vdev_name(vq),
+                     check_virtio_device_remote(virtqueue_get_vdev(vq)) ? "remote" : "local");
+
         // tag one elem is handled
         pthread_mutex_lock(&rw_lock);
         g_hash_table_remove(gsi_elems, make_elem_key(vq_nr, index));
