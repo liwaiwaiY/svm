@@ -120,7 +120,7 @@ int remote_uring_init(bool remote_stub)
     force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
 
     if (!remote_stub) { // local_qemu
-        gsi_tables = g_hash_table_new(g_direct_hash, g_direct_equal);
+        gsi_tables = g_hash_table_new(g_str_hash, g_str_equal);
     }
     gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
     int ret = io_uring_queue_init(IO_URING_DEPTH, remote_uring, 0);
@@ -550,16 +550,21 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
 
 static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 {
+    GHashTable *inner = NULL;
+    gchar *key = NULL;
+
     // gsi_stubs
     if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
         g_hash_table_remove(gsi_stubs, vdev->name);
     }
-    // gsi_elems
-    g_hash_table_destroy(g_hash_table_lookup(gsi_tables, vdev->name));
-    // gsi_tables
-    if (g_hash_table_lookup(gsi_tables, vdev->name)) {
-        g_free(g_hash_table_lookup(gsi_tables, vdev->name));
+    // gsi_elems + gsi_tables
+    if (g_hash_table_lookup_extended(gsi_tables, vdev->name,
+                                     (gpointer *)&key, (gpointer *)&inner)) {
+        if (inner) {
+            g_hash_table_destroy(inner);
+        }
         g_hash_table_remove(gsi_tables, vdev->name);
+        g_free(key);
     }
 }
 
@@ -822,9 +827,7 @@ int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
     force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", vdev->name);
     if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
         GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
-        char *vdev_name = g_new0(char, strlen(vdev->name) + 1);
-        strcpy(vdev_name, vdev->name);
-        g_hash_table_insert(gsi_tables, vdev_name, ptr);
+        g_hash_table_insert(gsi_tables, g_strdup(vdev->name), ptr);
     }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
