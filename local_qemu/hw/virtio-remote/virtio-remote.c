@@ -346,7 +346,6 @@ static void remote_stub_read_handler(void *opaque)
         return;
     }
 
-    force_printf("recv header...");
     read_cnt = 0;
     while (read_cnt < (int)sizeof(req_header)) {
         sqe = io_uring_get_sqe(remote_uring);
@@ -370,13 +369,14 @@ static void remote_stub_read_handler(void *opaque)
               (req_header[10] << 8) | req_header[11];
     in_len  = (req_header[12] << 24) | (req_header[13] << 16) |
               (req_header[14] << 8) | req_header[15];
+    force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
+                 vq_nr, index, out_len, in_len);
 
     out_buf = g_new0(uint8_t, out_len);
     if (!out_buf) {
         return;
     }
 
-    force_printf("recv data...");
     read_cnt = 0;
     while (read_cnt < out_len) {
         sqe = io_uring_get_sqe(remote_uring);
@@ -390,14 +390,19 @@ static void remote_stub_read_handler(void *opaque)
             goto link_err;
         }
         read_cnt += cqe->res;
+        force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
+                     cqe->res, read_cnt, out_len);
         io_uring_cqe_seen(remote_uring, cqe);
     }
 
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
     if (!vq) {
+        force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
+                     vq_nr, vdev->name);
         g_free(out_buf);
         return;
     }
+    force_printf("[remote_stub_read_handler] found vq");
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
 
@@ -761,6 +766,8 @@ static void route_to_remote(VirtQueue *vq, int stub)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(remote_uring);
 
+        force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
+                     header[0], header[1], header[2], header[3]);
         force_printf("[route_to_remote] sent a msg with out_num: %d, in_num: %d", elem->out_num, elem->in_num);
 
         io_uring_wait_cqe(remote_uring, &cqe);
