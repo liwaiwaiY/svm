@@ -361,14 +361,14 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_cqe_seen(remote_uring, cqe);
     }
 
-    vq_nr  = (req_header[0] << 24) | (req_header[1] << 16) |
-             (req_header[2] << 8) | req_header[3];
-    index  = (req_header[4] << 24) | (req_header[5] << 16) |
-             (req_header[6] << 8) | req_header[7];
-    out_len = (req_header[8] << 24) | (req_header[9] << 16) |
-              (req_header[10] << 8) | req_header[11];
-    in_len  = (req_header[12] << 24) | (req_header[13] << 16) |
-              (req_header[14] << 8) | req_header[15];
+    vq_nr  = req_header[0] | (req_header[1] << 8) |
+             (req_header[2] << 16) | (req_header[3] << 24);
+    index  = req_header[4] | (req_header[5] << 8) |
+             (req_header[6] << 16) | (req_header[7] << 24);
+    out_len = req_header[8] | (req_header[9] << 8) |
+              (req_header[10] << 16) | (req_header[11] << 24);
+    in_len  = req_header[12] | (req_header[13] << 8) |
+              (req_header[14] << 16) | (req_header[15] << 24);
     force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
                  vq_nr, index, out_len, in_len);
 
@@ -619,7 +619,7 @@ static void* resp_listener(void *opaque)
 
     force_printf("[resp_listener] to listener resps for vdev %s", vdev->name);
 
-    while (atomic_load(&sending)) { // each loop handle one resp
+    while (true) {
 listen_begin:
         phase = 0;
         pthread_mutex_lock(&rw_lock);
@@ -652,12 +652,12 @@ listen_header:
             read_cnt += cqe->res;
             io_uring_cqe_seen(remote_uring, cqe);
         }
-        vq_nr = (resp_header[0] << 24) | (resp_header[1] << 16) |
-                (resp_header[2] << 8) | resp_header[3];
-        index = (resp_header[4] << 24) | (resp_header[5] << 16) |
-                (resp_header[6] << 8) | resp_header[7];
-        len   = (resp_header[8] << 24) | (resp_header[9] << 16) |
-                (resp_header[10] << 8) | resp_header[11];
+        vq_nr = resp_header[0] | (resp_header[1] << 8) |
+                (resp_header[2] << 16) | (resp_header[3] << 24);
+        index = resp_header[4] | (resp_header[5] << 8) |
+                (resp_header[6] << 16) | (resp_header[7] << 24);
+        len   = resp_header[8] | (resp_header[9] << 8) |
+                (resp_header[10] << 16) | (resp_header[11] << 24);
 
         force_printf("get header as [%d, %d, %d]", vq_nr, index, len);
 
