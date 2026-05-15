@@ -2805,8 +2805,14 @@ static void virtio_irq(VirtQueue *vq)
      * function.
      */
     if (qemu_in_iothread()) {
+        if (check_virtio_device_remote(vq->vdev))
+            force_printf("[virtio_irq] defer_call notify vq[%d] of vdev[%s]",
+                         vq->queue_index, vq->vdev->name);
         defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
     } else {
+        if (check_virtio_device_remote(vq->vdev))
+            force_printf("[virtio_irq] notify vq[%d] of vdev[%s] as vector[%d]",
+                         vq->queue_index, vq->vdev->name, vq->vector);
         virtio_notify_vector(vq->vdev, vq->vector);
     }
 }
@@ -2814,11 +2820,15 @@ static void virtio_irq(VirtQueue *vq)
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
     if (vq->remote_ctx) {
+        force_printf("[virtio_notify] notify vq[%d] of vdev[%s] skip as remote_ctx", vq->queue_index, vdev->name);
         return;
     }
 
     WITH_RCU_READ_LOCK_GUARD() {
         if (!virtio_should_notify(vdev, vq)) {
+            if (check_virtio_device_remote(vdev))
+                force_printf("[virtio_notify] notify notify vq[%d] of vdev[%s] skip as it should not",
+                             vq->queue_index, vdev->name);
             return;
         }
     }

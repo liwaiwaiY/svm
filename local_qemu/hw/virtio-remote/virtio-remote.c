@@ -58,7 +58,7 @@
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 
 __attribute__((format(printf, 1, 2)))
-static void force_printf(const char *fmt, ...)
+void force_printf(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
@@ -434,7 +434,7 @@ static void remote_stub_read_handler(void *opaque)
     *  g_free(elem);
     */
 
-    force_printf("call handle_output...");
+    force_printf("[remote_stub_read_handler] call handle_output...");
     virtqueue_call_handle_output(vq);
 
     // early free
@@ -462,6 +462,7 @@ static void remote_stub_read_handler(void *opaque)
     // reset remote_ctx
     memset(ctx, 0, sizeof(*ctx));
 
+    force_printf("[remote_stub_read_handler] return");
     return;
 
 link_err:
@@ -623,7 +624,7 @@ static void* resp_listener(void *opaque)
 listen_begin:
         phase = 0;
         pthread_mutex_lock(&rw_lock);
-        force_printf("begin to wait, still [%d, %d]", sent, recved);
+        force_printf("[resp_listener] begin to wait, still [%d, %d]", sent, recved);
         // route_to_remoting is running but all resps have been handled
         while (atomic_load(&sending) && (recved >= sent)) {
             pthread_cond_wait(&rw_cond, &rw_lock);
@@ -631,11 +632,11 @@ listen_begin:
         pthread_mutex_unlock(&rw_lock);
         // route_to_remote exits && all resps have been handled
         if (!atomic_load(&sending) && recved >= sent) {
-            force_printf("recved all resps");
+            force_printf("[resp_listener] recved all resps");
             break;
         }
 
-        force_printf("recv a resp, begin to read header");
+        force_printf("[resp_listener] recv a resp, begin to read header");
         read_cnt = 0;
 listen_header:
         phase = 1;
@@ -659,10 +660,11 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        force_printf("get header as [%d, %d, %d]", vq_nr, index, len);
+        force_printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]", vq_nr, index, len);
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
+            force_printf("[resp_listener] vq [%d] cannot found.", vq_nr);
             goto elem_err;
         }
 
@@ -670,6 +672,7 @@ listen_header:
         elem = g_hash_table_lookup(gsi_elems, make_elem_key(vq_nr, index));
         if (!elem) {
             pthread_mutex_unlock(&rw_lock);
+            force_printf("[resp_listener] elem with index [%d] cannot found", index);
             goto elem_err;
         }
         pthread_mutex_unlock(&rw_lock);
@@ -689,14 +692,17 @@ listen_data:
                 goto link_err;
             }
             read_cnt += cqe->res;
+            force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
             io_uring_cqe_seen(remote_uring, cqe);
         }
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         g_free(buf);
 
+        force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
         virtqueue_push(vq, elem, elem->len);
         // notify guest_notifiers or msix-write
+        force_printf("[resp_listener] notify vq [%d]", vq_nr);
         virtio_notify(virtqueue_get_vdev(vq), vq);
         // tag one elem is handled
         pthread_mutex_lock(&rw_lock);
@@ -798,7 +804,8 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 {
-    force_printf("[remote_virtio_queue_notify_vq] vq has been notified");
+    force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
+                 virtio_get_queue_index(vq), virtqueue_get_vdev_name(vq));
     if (virtqueue_get_vring_desc(vq)) {
         sent = 0;
         recved = 0;
@@ -831,6 +838,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
             virtio_set_started(vdev, true);
         }
     }
+    force_printf("[remote_virtio_queue_notify_vq] return");
 }
 
 // this function is called by the ioeventfd notify
