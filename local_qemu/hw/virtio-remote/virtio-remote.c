@@ -311,6 +311,7 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     return;
 
 err_connect:
+    force_printf("failed to connect to %s:%d", ip, port);
 err_sock2:
     close(fd);
 err_option:
@@ -818,6 +819,7 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
+    force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", vdev->name);
     if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
         GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
         char *vdev_name = g_new0(char, strlen(vdev->name) + 1);

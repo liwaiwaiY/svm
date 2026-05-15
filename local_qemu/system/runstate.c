@@ -950,7 +950,8 @@ int qemu_main_loop(void)
 
 static bool remote_stub_loop_should_exit(int *status)
 {
-    return false;
+    *status= EXIT_SUCCESS;
+    return qemu_shutdown_requested() || qemu_powerdown_requested();
 }
 
 int remote_stub_loop(void)
