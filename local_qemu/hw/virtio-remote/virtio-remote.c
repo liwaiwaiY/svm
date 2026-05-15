@@ -95,11 +95,15 @@ GHashTable *set_aio = NULL;
 
 static struct io_uring remote_uring_data;
 static struct io_uring *remote_uring = &remote_uring_data;
-static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  rw_cond = PTHREAD_COND_INITIALIZER;
 
+/*
+*  decoupling I/O with strong ordering
+*/
+static bool sending, recving;
 static int sent, recved;
-static atomic_bool sending;
+static int notified;
+static sem_t sem1, sem2;
+
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
@@ -641,18 +645,11 @@ static void* resp_listener(void *opaque)
     while (true) {
 listen_begin:
         phase = 0;
-        pthread_mutex_lock(&rw_lock);
-        force_printf("[resp_listener] begin to wait, still [%d, %d]", sent, recved);
-        // route_to_remoting is running but all resps have been handled
-        while (atomic_load(&sending) && (recved >= sent)) {
-            pthread_cond_wait(&rw_cond, &rw_lock);
-        }
-        pthread_mutex_unlock(&rw_lock);
-        // route_to_remote exits && all resps have been handled
-        if (!atomic_load(&sending) && recved >= sent) {
-            force_printf("[resp_listener] recved all resps");
+
+        while (qatomic_read(&sending) && (qatomic_read(&recved) >= qatomic_read(&sent)))
+            sem_wait(&sem1);
+        if (!qatomic_read(&sending) && (qatomic_read(&recved) >= qatomic_read(&sent)))
             break;
-        }
 
         force_printf("[resp_listener] recv a resp, begin to read header");
         read_cnt = 0;
@@ -686,14 +683,11 @@ listen_header:
             goto elem_err;
         }
 
-        pthread_mutex_lock(&rw_lock);
         elem = g_hash_table_lookup(gsi_elems, make_elem_key(vq_nr, index));
         if (!elem) {
-            pthread_mutex_unlock(&rw_lock);
             force_printf("[resp_listener] elem with index [%d] cannot found", index);
             goto elem_err;
         }
-        pthread_mutex_unlock(&rw_lock);
 
         buf = g_new0(char, len);
         read_cnt = 0;
@@ -719,18 +713,14 @@ listen_data:
 
         force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
         virtqueue_push(vq, elem, elem->len);
-        // notify guest_notifiers or msix-write
         force_printf("[resp_listener] notify vq [%d]", vq_nr);
-        virtio_notify(virtqueue_get_vdev(vq), vq);
-
-        // tag one elem is handled
-        pthread_mutex_lock(&rw_lock);
-        g_hash_table_remove(gsi_elems, make_elem_key(vq_nr, index));
-        recved++;
-        pthread_mutex_unlock(&rw_lock);
+        
+        qatomic_fetch_inc(&recved);
+        sem_post(&sem2);
     }
 
     force_printf("[resp_listener] return");
+    qatomic_set(&recving, false);
     return NULL;
 
 hash_err:
@@ -756,8 +746,17 @@ elem_err:
     return NULL;
 }
 
-static void route_to_remote(VirtQueue *vq, int stub)
+typedef struct SenderParam {
+    VirtQueue *vq;
+    int stub;
+} SenderParam;
+
+static void* route_to_remote(void *opaque)
 {
+
+    SenderParam *param = (SenderParam*) opaque;
+    VirtQueue *vq = param->vq;
+    int stub = param->stub;
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
@@ -766,7 +765,7 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
     force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_name(vq));
 
-    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
+    while (elem = virtqueue_pop(vq, sizeof(VirtQueueElement))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
         struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
         int header[4];
@@ -808,18 +807,12 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
         force_printf("[route_to_remote] sent success");
 
-        // a new resp is needed
-        if (elem->in_num > 0) {
-            pthread_mutex_lock(&rw_lock);
-            g_hash_table_insert(gsi_elems, make_elem_key(vq_nr, elem->index), elem);
-            sent++;
-            pthread_cond_signal(&rw_cond);
-            force_printf("[route_to_remote]a new resp is needed with total %d", sent);
-            pthread_mutex_unlock(&rw_lock);
-        } else {
-            virtqueue_push(vq, elem, 0);
-        }
+        g_hash_table_insesrt(gsi_elems, make_elem_key(vq_nr, elem->index));
+        qatomic_fetch_inc(&sent);
+        sem_post(&sem1);
     }
+
+    qatomic_set(&sending, false);
 }
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
@@ -837,22 +830,38 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         }
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        force_printf("[remote_virtio_queue_notify_vq]start to send ...");
-        atomic_store(&sending, true);
+        // reset
+        sending = recving = true;
+        sent = recved  = notified = 0;
+        sem_init(&sem1, 0, 0); sem_init(&sem2, 0, 0);
+
         QemuThread listener;
-        ListenerParam *param = g_new0(ListenerParam, 1);
-        param->vdev = vdev;
-        param->stub = stub;
+        ListenerParam *listen_param = g_new0(ListenerParam, 1);
+        listen_param->vdev = vdev;
+        listen_param->stub = stub;
+
+        QemuThread sender;
+        SenderParam *sender_param = g_new0(SenderParam, 1);
+        sender_param->vq = vq;
+        sender_param->stub = stub;
+
         qemu_thread_create(&listener, "remote_virtqueue_listener",
-                           resp_listener, param, QEMU_THREAD_JOINABLE);
-        route_to_remote(vq, stub);
-        // awake sub-thread to exit
-        atomic_store(&sending, false);
-        pthread_cond_signal(&rw_cond);
-        force_printf("[remote_virtio_queue_notify_vq] stop sending ...");
-        qemu_thread_join(&listener);
-        g_free(param);
-        force_printf("[remote_virtio_queue_notify_vq] all resps have been clollected");
+                           resp_listener, listen_param, QEMU_THREAD_JOINABLE);
+        qemu_thread_create(&sender, "remote_virtqueue_sender",
+                           route_to_remote, sender_param, QEMU_THREAD_JOINABLE);
+
+        while (true) {
+            while (qatomic_read(&recving) && (notified >= qatomic_read(&recved))) {
+                sem_wait(&sem2);
+            }
+            if (!qatomic_read(&recving) && (notified >= qatomic_read(&recved)))
+                break;
+            // handle a notification
+            virtio_notify(virtqueue_get_vdev(vq), vq);
+            notified++;
+        }
+
+        sem_destroy(&sem1); sem_destroy(&sem2);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);

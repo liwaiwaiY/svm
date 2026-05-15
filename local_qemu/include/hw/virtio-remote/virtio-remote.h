@@ -59,4 +59,8 @@ void remote_virtio_register_aio(VirtIODevice *vdev);
 // vhost
 
 
+typedef struct RingBuf {
+    
+} RingBuf;
+
 #endif /* VIRTIO_REMOTE */

@@ -2319,11 +2319,6 @@ void qemu_put_virtqueue_element(VirtIODevice *vdev, QEMUFile *f,
     qemu_put_buffer(f, (uint8_t *)&data, sizeof(VirtQueueElementOld));
 }
 
-static void remote_virtio_notify_vector(VirtQueue *vq)
-{
-    virtio_notify_vector(vq->vdev, vq->vector);
-}
-
 /* virtio device */
 static void virtio_notify_vector(VirtIODevice *vdev, uint16_t vector)
 {
@@ -2802,16 +2797,6 @@ static void virtio_irq(VirtQueue *vq)
      * to an atomic operation.
      */
     virtio_set_isr(vq->vdev, 0x1);
-
-    // cmsvm
-    if (check_virtio_device_remote(vq->vdev)) {
-        if (check_origin_qemu_in_iothread(vq->vdev)) {
-            defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
-        } else {
-            defer_call(remote_virtio_notify_vector, vq);
-        }
-        return;
-    }
 
     /*
      * The interrupt code path requires the Big QEMU Lock (BQL), so use the
