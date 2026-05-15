@@ -38,7 +38,8 @@
       "request": "launch",
       "program": "${workspaceFolder}/local_qemu/build/remote-stub",
       "args": [
-        "-device", "virtio-balloon-pci,remote-stub=8080"
+        "-object", "cryptodev-backend-builtin,id=cryptodev0",
+        "-device", "virtio-balloon-pci,cryptodev=cryptodev0,remote-stub=5553"
       ],
       "stopAtEntry": true,
       "cwd": "${fileDirname}",

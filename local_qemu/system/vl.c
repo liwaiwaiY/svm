@@ -2738,12 +2738,12 @@ static void qemu_init_board(void)
     realtime_init();
 }
 
-// cmsvm
-static void remote_stub_create_virtio_devices(void)
-{
-    qemu_opts_foreach(qemu_find_opts("device"),
-                      device_init_func, NULL, &error_fatal);
-}
+// // cmsvm
+// static void remote_stub_create_virtio_devices(void)
+// {
+//     qemu_opts_foreach(qemu_find_opts("device"),
+//                       device_init_func, NULL, &error_fatal);
+// }
 
 static void qemu_create_cli_devices(void)
 {
@@ -2858,10 +2858,10 @@ void qmp_x_exit_preconfig(Error **errp)
 // no vcpu, no machine, no board initialization
 void qemu_init_remote_stub(int argc, char **argv)
 {
-    char *argv_buf[argc + 2];
+    char **argv_buf = g_new0(char *, argc + 2);
     argv_buf[0] = argv[0];
     argv_buf[1] = (char *)"-machine";
-    argv_buf[2] = (char *)"x-remote-machine";
+    argv_buf[2] = (char *)"x-remote";
     memcpy(argv_buf + 3, argv + 1, (argc - 1) * sizeof(char *));
     qemu_init(argc + 2, argv_buf);
     // Error *err = NULL;
