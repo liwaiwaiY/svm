@@ -54,6 +54,8 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
 bool remote_virtio_notify_skip(VirtIODevice *vdev);
 
 void force_printf(const char *fmt, ...);
+bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
+void remote_virtio_register_aio(VirtIODevice *vdev);
 // vhost
 
 

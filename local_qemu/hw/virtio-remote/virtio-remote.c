@@ -88,6 +88,11 @@ GHashTable *gsi_tables = NULL;
 */
 // GHashTable *gsi_elems = NULL;
 
+/*
+*  format: <K:vdev->name, V:Bool>
+*/
+GHashTable *set_aio = NULL;
+
 static struct io_uring remote_uring_data;
 static struct io_uring *remote_uring = &remote_uring_data;
 static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -98,7 +103,23 @@ static atomic_bool sending;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
+    if (!gsi_stubs)
+        return false;
     return g_hash_table_contains(gsi_stubs, vdev->name);
+}
+
+bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
+{
+    if (!set_aio)
+        return false;
+    return g_hash_table_contains(set_aio, vdev->name);
+}
+
+void remote_virtio_register_aio(VirtIODevice *vdev)
+{
+    if (!set_aio)
+        set_aio = g_hash_table_new(g_str_hash, g_str_equal);
+    g_hash_table_insert(set_aio, (gpointer)(vdev->name), GINT_TO_POINTER(0));
 }
 
 static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
@@ -556,21 +577,20 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
 static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 {
     GHashTable *inner = NULL;
-    gchar *key = NULL;
 
     // gsi_stubs
     if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
         g_hash_table_remove(gsi_stubs, vdev->name);
     }
     // gsi_elems + gsi_tables
-    if (g_hash_table_lookup_extended(gsi_tables, vdev->name,
-                                     (gpointer *)&key, (gpointer *)&inner)) {
-        if (inner) {
-            g_hash_table_destroy(inner);
-        }
+    inner = g_hash_table_lookup(gsi_tables, vdev->name);
+    if (inner) {
+        g_hash_table_destroy(inner);
         g_hash_table_remove(gsi_tables, vdev->name);
-        g_free(key);
     }
+    // set_aio
+    if (set_aio && g_hash_table_contains(set_aio, vdev->name))
+        g_hash_table_remove(set_aio, vdev->name);
 }
 
 static void close_remote_virtio_device_sockets(VirtIODevice *vdev)
@@ -701,16 +721,7 @@ listen_data:
         virtqueue_push(vq, elem, elem->len);
         // notify guest_notifiers or msix-write
         force_printf("[resp_listener] notify vq [%d]", vq_nr);
-
-        force_printf("[resp listner tmp debugger] vdev[%s] by checking is [%s]",
-                     virtqueue_get_vdev_name(vq),
-                     check_virtio_device_remote(virtqueue_get_vdev(vq)) ? "remote" : "local");
-
         virtio_notify(virtqueue_get_vdev(vq), vq);
-
-        force_printf("[resp listner tmp debugger] vdev[%s] by checking is [%s]",
-                     virtqueue_get_vdev_name(vq),
-                     check_virtio_device_remote(virtqueue_get_vdev(vq)) ? "remote" : "local");
 
         // tag one elem is handled
         pthread_mutex_lock(&rw_lock);
@@ -719,6 +730,7 @@ listen_data:
         pthread_mutex_unlock(&rw_lock);
     }
 
+    force_printf("[resp_listener] return");
     return NULL;
 
 hash_err:
@@ -865,7 +877,7 @@ int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
     force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", vdev->name);
     if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
         GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
-        g_hash_table_insert(gsi_tables, g_strdup(vdev->name), ptr);
+        g_hash_table_insert(gsi_tables, (gpointer)vdev->name, ptr);
     }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));

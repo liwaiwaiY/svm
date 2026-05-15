@@ -2319,6 +2319,11 @@ void qemu_put_virtqueue_element(VirtIODevice *vdev, QEMUFile *f,
     qemu_put_buffer(f, (uint8_t *)&data, sizeof(VirtQueueElementOld));
 }
 
+static void remote_virtio_notify_vector(VirtQueue *vq)
+{
+    virtio_notify_vector(vq->vdev, vq->vector);
+}
+
 /* virtio device */
 static void virtio_notify_vector(VirtIODevice *vdev, uint16_t vector)
 {
@@ -2798,6 +2803,16 @@ static void virtio_irq(VirtQueue *vq)
      */
     virtio_set_isr(vq->vdev, 0x1);
 
+    // cmsvm
+    if (check_virtio_device_remote(vq->vdev)) {
+        if (check_origin_qemu_in_iothread(vq->vdev)) {
+            defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
+        } else {
+            defer_call(remote_virtio_notify_vector, vq);
+        }
+        return;
+    }
+
     /*
      * The interrupt code path requires the Big QEMU Lock (BQL), so use the
      * notifier instead when in an IOThread. This assumes that device models
@@ -2805,14 +2820,8 @@ static void virtio_irq(VirtQueue *vq)
      * function.
      */
     if (qemu_in_iothread()) {
-        if (check_virtio_device_remote(vq->vdev))
-            force_printf("[virtio_irq] defer_call notify vq[%d] of vdev[%s]",
-                         vq->queue_index, vq->vdev->name);
         defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
     } else {
-        if (check_virtio_device_remote(vq->vdev))
-            force_printf("[virtio_irq] notify vq[%d] of vdev[%s] as vector[%d]",
-                         vq->queue_index, vq->vdev->name, vq->vector);
         virtio_notify_vector(vq->vdev, vq->vector);
     }
 }
@@ -2820,15 +2829,11 @@ static void virtio_irq(VirtQueue *vq)
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
     if (vq->remote_ctx) {
-        force_printf("[virtio_notify] notify vq[%d] of vdev[%s] skip as remote_ctx", vq->queue_index, vdev->name);
         return;
     }
 
     WITH_RCU_READ_LOCK_GUARD() {
         if (!virtio_should_notify(vdev, vq)) {
-            if (check_virtio_device_remote(vdev))
-                force_printf("[virtio_notify] notify notify vq[%d] of vdev[%s] skip as it should not",
-                             vq->queue_index, vdev->name);
             return;
         }
     }
@@ -2848,6 +2853,16 @@ void virtio_notify_config(VirtIODevice *vdev)
 
     virtio_set_isr(vdev, 0x3);
     vdev->generation++;
+
+    // cmsvm
+    if (check_virtio_device_remote(vdev)) {
+        if (check_origin_qemu_in_iothread(vdev)) {
+            defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
+        } else {
+            virtio_notify_vector(vdev, vdev->config_vector);
+        }
+        return;
+    }
 
     if (qemu_in_iothread()) {
         defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
@@ -4023,6 +4038,7 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     cb = NULL;
     if (unlikely(check_virtio_device_remote(vq->vdev))) {
         cb = remote_virtio_queue_host_notifier_read;
+        remote_virtio_register_aio(vq->vdev);
     } else {
         cb = virtio_queue_host_notifier_read;
     }
@@ -4056,8 +4072,18 @@ void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ct
         virtio_queue_set_notification(vq, 1);
     }
 
+    // cmsvm
+    void (*cb)(EventNotifier *n);
+    cb = NULL;
+    if (unlikely(check_virtio_device_remote(vq->vdev))) {
+        cb = remote_virtio_queue_host_notifier_read;
+        remote_virtio_register_aio(vq->vdev);
+    } else {
+        cb = virtio_queue_host_notifier_read;
+    }
+
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           virtio_queue_host_notifier_read,
+                           cb,
                            NULL, NULL);
 
     /*
