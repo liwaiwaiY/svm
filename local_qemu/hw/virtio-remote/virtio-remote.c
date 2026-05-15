@@ -47,6 +47,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 
 /*
 *  Transport Protocol:
@@ -93,7 +94,7 @@ static pthread_mutex_t rw_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  rw_cond = PTHREAD_COND_INITIALIZER;
 
 static int sent, recved;
-static bool sending = false;
+static atomic_bool sending;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
@@ -613,18 +614,18 @@ static void* resp_listener(void *opaque)
 
     force_printf("[resp_listener] to listener resps for vdev %s", vdev->name);
 
-    while (sending) { // each loop handle one resp
-        force_printf("begin to wait, still [%d, %d]", sent, recved);
+    while (atomic_load(&sending)) { // each loop handle one resp
 listen_begin:
         phase = 0;
         pthread_mutex_lock(&rw_lock);
+        force_printf("begin to wait, still [%d, %d]", sent, recved);
         // route_to_remoting is running but all resps have been handled
-        while (sending && (recved >= sent)) {
+        while (atomic_load(&sending) && (recved >= sent)) {
             pthread_cond_wait(&rw_cond, &rw_lock);
         }
         pthread_mutex_unlock(&rw_lock);
         // route_to_remote exits && all resps have been handled
-        if (!sending && recved >= sent) {
+        if (!atomic_load(&sending) && recved >= sent) {
             force_printf("recved all resps");
             break;
         }
@@ -660,10 +661,13 @@ listen_header:
             goto elem_err;
         }
 
+        pthread_mutex_lock(&rw_lock);
         elem = g_hash_table_lookup(gsi_elems, make_elem_key(vq_nr, index));
         if (!elem) {
+            pthread_mutex_unlock(&rw_lock);
             goto elem_err;
         }
+        pthread_mutex_unlock(&rw_lock);
 
         buf = g_new0(char, len);
         read_cnt = 0;
@@ -690,8 +694,10 @@ listen_data:
         // notify guest_notifiers or msix-write
         virtio_notify(virtqueue_get_vdev(vq), vq);
         // tag one elem is handled
+        pthread_mutex_lock(&rw_lock);
         g_hash_table_remove(gsi_elems, make_elem_key(vq_nr, index));
         recved++;
+        pthread_mutex_unlock(&rw_lock);
     }
 
     return NULL;
@@ -771,10 +777,12 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
         // a new resp is needed
         if (elem->in_num > 0) {
+            pthread_mutex_lock(&rw_lock);
             g_hash_table_insert(gsi_elems, make_elem_key(vq_nr, elem->index), elem);
             sent++;
             pthread_cond_signal(&rw_cond);
             force_printf("[route_to_remote]a new resp is needed with total %d", sent);
+            pthread_mutex_unlock(&rw_lock);
         } else {
             virtqueue_push(vq, elem, 0);
         }
@@ -796,7 +804,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         force_printf("[remote_virtio_queue_notify_vq]start to send ...");
-        sending = true;
+        atomic_store(&sending, true);
         QemuThread listener;
         ListenerParam *param = g_new0(ListenerParam, 1);
         param->vdev = vdev;
@@ -805,10 +813,11 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
                            resp_listener, param, QEMU_THREAD_JOINABLE);
         route_to_remote(vq, stub);
         // awake sub-thread to exit
-        sending = false;
+        atomic_store(&sending, false);
         pthread_cond_signal(&rw_cond);
         force_printf("[remote_virtio_queue_notify_vq] stop sending ...");
         qemu_thread_join(&listener);
+        g_free(param);
         force_printf("[remote_virtio_queue_notify_vq] all resps have been clollected");
 
         if (unlikely(vdev->start_on_kick)) {
