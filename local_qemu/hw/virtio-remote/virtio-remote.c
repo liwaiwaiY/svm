@@ -754,6 +754,9 @@ static void route_to_remote(VirtQueue *vq, int stub)
         io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(remote_uring);
+
+        force_printf("[route_to_remote] sent a msg with out_num: %d, in_num: %d", elem->out_num, elem->in_num);
+
         io_uring_wait_cqe(remote_uring, &cqe);
         io_uring_cqe_seen(remote_uring, cqe);
 
@@ -764,12 +767,14 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
         g_free(msg_sg);
 
+        force_printf("[route_to_remote] sent success");
+
         // a new resp is needed
         if (elem->in_num > 0) {
             g_hash_table_insert(gsi_elems, make_elem_key(vq_nr, elem->index), elem);
             sent++;
             pthread_cond_signal(&rw_cond);
-            force_printf("a new resp is needed with total %d", sent);
+            force_printf("[route_to_remote]a new resp is needed with total %d", sent);
         } else {
             virtqueue_push(vq, elem, 0);
         }
@@ -778,7 +783,7 @@ static void route_to_remote(VirtQueue *vq, int stub)
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 {
-    force_printf("[remote_virtio_queue_notify_vq]");
+    force_printf("[remote_virtio_queue_notify_vq] vq has been notified");
     if (virtqueue_get_vring_desc(vq)) {
         sent = 0;
         recved = 0;
@@ -790,7 +795,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         }
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        force_printf("start to send ...");
+        force_printf("[remote_virtio_queue_notify_vq]start to send ...");
         sending = true;
         QemuThread listener;
         ListenerParam *param = g_new0(ListenerParam, 1);
@@ -802,8 +807,9 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         // awake sub-thread to exit
         sending = false;
         pthread_cond_signal(&rw_cond);
-        force_printf("stop sending ...");
+        force_printf("[remote_virtio_queue_notify_vq] stop sending ...");
         qemu_thread_join(&listener);
+        force_printf("[remote_virtio_queue_notify_vq] all resps have been clollected");
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
