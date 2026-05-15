@@ -4019,19 +4019,23 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     }
 
     // cmsvm
-    void (*cb)(EventNotifier *n);
-    cb = NULL;
+    void (*cb1)(EventNotifier *n);
+    void (*cb2)(EventNotifier *n);
+    cb1 = NULL;
+    cb2 = NULL;
     if (unlikely(check_virtio_device_remote(vq->vdev))) {
-        cb = remote_virtio_queue_host_notifier_read;
+        cb1 = remote_virtio_queue_host_notifier_read;
+        cb2 = remote_virtio_queue_host_notifier_aio_poll_ready;
         remote_virtio_register_aio(vq->vdev);
     } else {
-        cb = virtio_queue_host_notifier_read;
+        cb1 = virtio_queue_host_notifier_read;
+        cb2 = virtio_queue_host_notifier_aio_poll_ready;
     }
 
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           cb,
+                           cb1,
                            virtio_queue_host_notifier_aio_poll,
-                           virtio_queue_host_notifier_aio_poll_ready);
+                           cb2);
     aio_set_event_notifier_poll(ctx, &vq->host_notifier,
                                 virtio_queue_host_notifier_aio_poll_begin,
                                 virtio_queue_host_notifier_aio_poll_end);

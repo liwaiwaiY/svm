@@ -56,6 +56,7 @@
 */
 
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
+#define RING_SIZE IO_URING_DEPTH
 
 __attribute__((format(printf, 1, 2)))
 void force_printf(const char *fmt, ...)
@@ -76,20 +77,17 @@ void force_printf(const char *fmt, ...)
 GHashTable *gsi_stubs = NULL;
 
 /*
-*  format: <K:vdev->name, V:GHashTable*>
+*  format: <K:vdev->name, V:CommCTX*>
 *  local_qemu: a hash table of sent elements
 *  remote_qemu: none
 */
 // 
-GHashTable *gsi_tables = NULL;
-/*
-*  need to find first in gsi_tables, only effective in local_qemu
-*  format: <K:(vq_nr<<16)|index, V:elemt>
-*/
-// GHashTable *gsi_elems = NULL;
+GHashTable *gsi_ctxes = NULL;
 
 /*
 *  format: <K:vdev->name, V:Bool>
+*  local_qemu: aio list
+*  remote_stub: none
 */
 GHashTable *set_aio = NULL;
 
@@ -99,11 +97,16 @@ static struct io_uring *remote_uring = &remote_uring_data;
 /*
 *  decoupling I/O with strong ordering
 */
-static bool sending, recving;
-static int sent, recved;
-static int notified;
-static sem_t sem1, sem2;
-
+typedef struct CommCTX {
+    bool sending;
+    bool recving;
+    int sent;
+    int recved;
+    int notified;
+    sem_t sem1;
+    sem_t sem2;
+    VirtQueueElement *ring;
+} CommCTX;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
@@ -134,17 +137,12 @@ static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
     return virtio_get_queue(vdev, vq_nr);
 }
 
-static gpointer make_elem_key(int vq_nr, unsigned int index)
-{
-    return GINT_TO_POINTER((vq_nr << 16) | (index & 0xFFFF));
-}
-
 int remote_uring_init(bool remote_stub)
 {
     force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
 
     if (!remote_stub) { // local_qemu
-        gsi_tables = g_hash_table_new(g_str_hash, g_str_equal);
+        gsi_ctxes = g_hash_table_new(g_str_hash, g_str_equal);
     }
     gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
     int ret = io_uring_queue_init(IO_URING_DEPTH, remote_uring, 0);
@@ -586,11 +584,9 @@ static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
     if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
         g_hash_table_remove(gsi_stubs, vdev->name);
     }
-    // gsi_elems + gsi_tables
-    inner = g_hash_table_lookup(gsi_tables, vdev->name);
-    if (inner) {
-        g_hash_table_destroy(inner);
-        g_hash_table_remove(gsi_tables, vdev->name);
+    // gsi_elems + gsi_ctxes
+    if (g_hash_table_lookup(gsi_ctxes, vdev->name)) {
+        g_hash_table_remove(gsi_ctxes, vdev->name);
     }
     // set_aio
     if (set_aio && g_hash_table_contains(set_aio, vdev->name))
@@ -619,26 +615,26 @@ static void close_remote_virtio_device_sockets(VirtIODevice *vdev)
 
 typedef struct ListenerParam {
     VirtIODevice *vdev;
+    VirtQueue *vq;
     int stub;
+    CommCTX *comm_ctx;
 } ListenerParam;
 
 static void* resp_listener(void *opaque)
 {
     ListenerParam *param = (ListenerParam *)opaque;
     VirtIODevice *vdev = param->vdev;
+    VirtQueue *vq = opaque->vq;
     int stub = param->stub;
+    CommCTX *comm_ctx = param->comm_ctx;
+    g_free(opaque);
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     uint8_t resp_header[3 * sizeof(int)];
     int vq_nr, index, len;
     int read_cnt, phase; // WARN: phase is not reliable code
     VirtQueueElement *elem;
-    VirtQueue *vq;
     char *buf = NULL;
-    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, vdev->name);
-    if (!gsi_elems) {
-        goto hash_err;
-    }
 
     force_printf("[resp_listener] to listener resps for vdev %s", vdev->name);
 
@@ -646,10 +642,16 @@ static void* resp_listener(void *opaque)
 listen_begin:
         phase = 0;
 
-        while (qatomic_read(&sending) && (qatomic_read(&recved) >= qatomic_read(&sent)))
-            sem_wait(&sem1);
-        if (!qatomic_read(&sending) && (qatomic_read(&recved) >= qatomic_read(&sent)))
+        while (qatomic_read(&comm_ctx->sending) && (qatomic_read(&comm_ctx->recved) >= qatomic_read(&comm_ctx->sent)))
+            sem_wait(&comm_ctx->sem1);
+        if (!qatomic_read(&comm_ctx->sending) && (qatomic_read(&comm_ctx->recved) >= qatomic_read(&comm_ctx->sent)))
             break;
+
+        elem = comm_ctx->ring[comm_ctx->recved % RING_SIZE];
+        if (elem->in_num == 0) {
+            elem->len = 0;
+            goto done;
+        }
 
         force_printf("[resp_listener] recv a resp, begin to read header");
         read_cnt = 0;
@@ -683,12 +685,6 @@ listen_header:
             goto elem_err;
         }
 
-        elem = g_hash_table_lookup(gsi_elems, make_elem_key(vq_nr, index));
-        if (!elem) {
-            force_printf("[resp_listener] elem with index [%d] cannot found", index);
-            goto elem_err;
-        }
-
         buf = g_new0(char, len);
         read_cnt = 0;
 listen_data:
@@ -710,17 +706,17 @@ listen_data:
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         g_free(buf);
-
         force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
+
+done:
         virtqueue_push(vq, elem, elem->len);
-        force_printf("[resp_listener] notify vq [%d]", vq_nr);
-        
-        qatomic_fetch_inc(&recved);
-        sem_post(&sem2);
+        qatomic_fetch_inc(&comm_ctx->recved);
+        sem_post(&comm_ctx->sem2);
     }
 
     force_printf("[resp_listener] return");
-    qatomic_set(&recving, false);
+    qatomic_set(&comm_ctx->recving, false);
+    sem_post(&comm_ctx->sem2);
     return NULL;
 
 hash_err:
@@ -749,18 +745,19 @@ elem_err:
 typedef struct SenderParam {
     VirtQueue *vq;
     int stub;
+    CommCTX *comm_ctx
 } SenderParam;
 
 static void* route_to_remote(void *opaque)
 {
-
     SenderParam *param = (SenderParam*) opaque;
     VirtQueue *vq = param->vq;
     int stub = param->stub;
+    CommCTX *comm_ctx = param->comm_ctx;
+    g_free(opaque);
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
-    GHashTable *gsi_elems = g_hash_table_lookup(gsi_tables, virtqueue_get_vdev_name(vq));
     int vq_nr = virtio_get_queue_index(vq);
 
     force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_name(vq));
@@ -807,12 +804,14 @@ static void* route_to_remote(void *opaque)
 
         force_printf("[route_to_remote] sent success");
 
-        g_hash_table_insesrt(gsi_elems, make_elem_key(vq_nr, elem->index));
-        qatomic_fetch_inc(&sent);
-        sem_post(&sem1);
+        // neglect full first
+        comm_ctx->ring[comm_ctx->sent % RING_SIZE] = elem;
+        qatomic_fetch_inc(&comm_ctx->sent);
+        sem_post(&comm_ctx->sem1);
     }
 
-    qatomic_set(&sending, false);
+    qatomic_set(&comm_ctx->sending, false);
+    sem_post(&comm_ctx->sem1);
 }
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
@@ -820,8 +819,6 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
     force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
                  virtio_get_queue_index(vq), virtqueue_get_vdev_name(vq));
     if (virtqueue_get_vring_desc(vq)) {
-        sent = 0;
-        recved = 0;
         VirtIODevice *vdev = virtqueue_get_vdev(vq);
         int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
 
@@ -830,38 +827,45 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         }
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
+        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, vdev->name);
+        comm_ctx->ring = g_new0(int, RING_SIZE);
         // reset
-        sending = recving = true;
-        sent = recved  = notified = 0;
-        sem_init(&sem1, 0, 0); sem_init(&sem2, 0, 0);
+        comm_ctx->sending = comm_ctx->recving = true;
+        comm_ctx->sent = comm_ctx->recved  = comm_ctx->notified = 0;
+        sem_init(&comm_ctx->sem1, 0, 0); sem_init(&comm_ctx->sem2, 0, 0);
 
         QemuThread listener;
         ListenerParam *listen_param = g_new0(ListenerParam, 1);
         listen_param->vdev = vdev;
         listen_param->stub = stub;
+        listen_param->comm_ctx = comm_ctx;
 
         QemuThread sender;
         SenderParam *sender_param = g_new0(SenderParam, 1);
         sender_param->vq = vq;
         sender_param->stub = stub;
+        sender_param->comm_ctx = comm_ctx;
 
         qemu_thread_create(&listener, "remote_virtqueue_listener",
-                           resp_listener, listen_param, QEMU_THREAD_JOINABLE);
+                           resp_listener, listen_param, QEMU_THREAD_DETACHED);
         qemu_thread_create(&sender, "remote_virtqueue_sender",
-                           route_to_remote, sender_param, QEMU_THREAD_JOINABLE);
+                           route_to_remote, sender_param, QEMU_THREAD_DETACHED);
 
         while (true) {
-            while (qatomic_read(&recving) && (notified >= qatomic_read(&recved))) {
-                sem_wait(&sem2);
+            while (qatomic_read(&comm_ctx->recving) && (comm_ctx->notified >= qatomic_read(&comm_ctx->recved))) {
+                sem_wait(&comm_ctx->sem2);
             }
-            if (!qatomic_read(&recving) && (notified >= qatomic_read(&recved)))
+            if (!qatomic_read(&comm_ctx->recving) && (comm_ctx->notified >= qatomic_read(&comm_ctx->recved)))
                 break;
             // handle a notification
             virtio_notify(virtqueue_get_vdev(vq), vq);
-            notified++;
+            comm_ctx->notified++;
         }
 
-        sem_destroy(&sem1); sem_destroy(&sem2);
+        sem_destroy(&comm_ctx->sem1);
+        sem_destroy(&comm_ctx->sem2);
+        g_free(comm_ctx->ring);
+        comm_ctx->ring = NULL;
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
@@ -881,12 +885,19 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
     }
 }
 
+void virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
+{
+    VirtQueue *vq = container_of(n, VirtQueue, host_notifier);
+
+    remote_virtio_queue_notify_vq(vq);
+}
+
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", vdev->name);
-    if (!g_hash_table_lookup(gsi_tables, vdev->name)) {
-        GHashTable *ptr = g_hash_table_new(g_direct_hash, g_direct_equal);
-        g_hash_table_insert(gsi_tables, (gpointer)vdev->name, ptr);
+    if (!g_hash_table_lookup(gsi_ctxes, vdev->name)) {
+        CommCTX *comm_ctx = g_new0(CommCTX, 1);
+        g_hash_table_insert(gsi_ctxes, (gpointer)vdev->name, comm_ctx);
     }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
