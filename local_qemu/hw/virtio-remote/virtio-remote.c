@@ -69,6 +69,79 @@ void force_printf(const char *fmt, ...)
     fflush(stdout);
 }
 
+static void ensure_log_dir(const char *dir)
+{
+    g_mkdir_with_parents(dir, 0755);
+}
+
+static void log_hex_dump(const char *filepath, const char *prefix,
+                         int seq, const uint8_t *data, int len)
+{
+    FILE *f = fopen(filepath, "a");
+    int dump_len;
+    if (!f) return;
+
+    if (len < 32) {
+        dump_len = len;
+    } else {
+        dump_len = 32;
+    }
+
+    fprintf(f, "[%s #%d] len=%d: ", prefix, seq, len);
+    for (int i = 0; i < dump_len; i++) {
+        fprintf(f, "%02x ", data[i]);
+    }
+    fprintf(f, "\n");
+    fflush(f);
+    fclose(f);
+}
+
+static void log_hex_dump_iov(const char *filepath, const char *prefix,
+                             int seq, struct iovec *iov, int iov_cnt)
+{
+    FILE *f = fopen(filepath, "a");
+    int total = 0;
+    int printed = 0;
+    if (!f) return;
+
+    for (int i = 0; i < iov_cnt; i++) {
+        total += iov[i].iov_len;
+    }
+
+    fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
+    for (int i = 0; i < iov_cnt && printed < 32; i++) {
+        uint8_t *p = (uint8_t *)iov[i].iov_base;
+        int n = iov[i].iov_len;
+        if (n > 32 - printed) n = 32 - printed;
+        fprintf(f, "  iov[%d](%d): ", i, (int)iov[i].iov_len);
+        for (int j = 0; j < n; j++) {
+            fprintf(f, "%02x ", p[j]);
+        }
+        fprintf(f, "\n");
+        printed += n;
+    }
+    fflush(f);
+    fclose(f);
+}
+
+static atomic_int local_send_seq;
+static atomic_int local_recv_seq;
+static atomic_int remote_recv_seq;
+static atomic_int remote_send_seq;
+
+#define LOCAL_LOG_DIR  "/home/waiai/SvmExp/local/svm/log"
+#define REMOTE_LOG_DIR "/home/waiai/SvmExp/remote/log"
+
+static void log_init_local(void)
+{
+    ensure_log_dir(LOCAL_LOG_DIR);
+}
+
+static void log_init_remote(void)
+{
+    ensure_log_dir(REMOTE_LOG_DIR);
+}
+
 /*
 *  format: <K:vdev->name, V:int>
 *  local_qemu: a link head of sockets of each vq
@@ -147,6 +220,7 @@ int remote_uring_init(bool remote_stub)
     gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
 
     if (!remote_stub) { // local_qemu
+        log_init_local();
         gsi_ctxes = g_hash_table_new(g_str_hash, g_str_equal);
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
         if (ret < 0) {
@@ -160,6 +234,7 @@ int remote_uring_init(bool remote_stub)
             return -1;
         }
     } else {
+        log_init_remote();
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
         if (ret < 0) {
             fprintf(stderr, "io_uring init failed\n");
@@ -281,6 +356,10 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         .msg_iovlen = 2,
     };
     force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]", ctx->vq_nr, ctx->elem_index, len);
+
+    log_hex_dump_iov(REMOTE_LOG_DIR "/send.log", "SEND",
+                     atomic_fetch_add(&remote_send_seq, 1) + 1,
+                     resp_iov, 2);
 
     sqe = io_uring_get_sqe(send_uring);
     io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
@@ -408,6 +487,10 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_cqe_seen(send_uring, cqe);
     }
 
+    log_hex_dump(REMOTE_LOG_DIR "/recv.log", "RECV_HDR",
+                 atomic_fetch_add(&remote_recv_seq, 1) + 1,
+                 req_header, sizeof(req_header));
+
     vq_nr  = req_header[0] | (req_header[1] << 8) |
              (req_header[2] << 16) | (req_header[3] << 24);
     index  = req_header[4] | (req_header[5] << 8) |
@@ -441,6 +524,10 @@ static void remote_stub_read_handler(void *opaque)
                      cqe->res, read_cnt, out_len);
         io_uring_cqe_seen(send_uring, cqe);
     }
+
+    log_hex_dump(REMOTE_LOG_DIR "/recv.log", "RECV",
+                 atomic_fetch_add(&remote_recv_seq, 1) + 1,
+                 out_buf, out_len);
 
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
     if (!vq) {
@@ -687,6 +774,9 @@ listen_header:
             read_cnt += cqe->res;
             io_uring_cqe_seen(resp_uring, cqe);
         }
+        log_hex_dump(LOCAL_LOG_DIR "/recv.log", "RECV_HDR",
+                     atomic_fetch_add(&local_recv_seq, 1) + 1,
+                     resp_header, sizeof(resp_header));
         vq_nr = resp_header[0] | (resp_header[1] << 8) |
                 (resp_header[2] << 16) | (resp_header[3] << 24);
         index = resp_header[4] | (resp_header[5] << 8) |
@@ -720,6 +810,9 @@ listen_data:
             force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
             io_uring_cqe_seen(resp_uring, cqe);
         }
+        log_hex_dump(LOCAL_LOG_DIR "/recv.log", "RECV",
+                     atomic_fetch_add(&local_recv_seq, 1) + 1,
+                     (uint8_t *)buf, len);
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         elem->len = len;
@@ -806,6 +899,10 @@ static void* route_to_remote(void *opaque)
 
         force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] wiht [out_num:%d in_num:%d]",
                      header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
+
+        log_hex_dump_iov(LOCAL_LOG_DIR "/send.log", "SEND",
+                         atomic_fetch_add(&local_send_seq, 1) + 1,
+                         msg_sg, elem->out_num + 1);
 
         io_uring_wait_cqe(send_uring, &cqe);
         io_uring_cqe_seen(send_uring, cqe);
