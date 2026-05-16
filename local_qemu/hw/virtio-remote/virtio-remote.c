@@ -200,11 +200,20 @@ static void *remote_stub_virtqueue_alloc_element(size_t sz, unsigned out_num, un
     return elem;
 }
 
+// remote_ctx has to be existing
+bool remote_virtio_queue_empty(void *opaque)
+{
+    RemoteVQueueCtx *remote_ctx = (RemoteVQueueCtx *)opaque;
+    return remote_ctx->elem; // popped once from the ctx
+}
+
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    if (ctx->elem) // handled once
+    if (ctx->elem) { // poped once
+        force_printf("[remote_stub_virtqueue_pop] empty as poped once from ctx");
         return NULL;
+    }
 
     // int out_num = ctx->out_num, in_num = ctx->in_num;
     int out_num = 1, in_num = 1; // todocmsvm v2: add sg_table
@@ -255,6 +264,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         .msg_iov = resp_iov,
         .msg_iovlen = 2,
     };
+    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]", ctx->vq_nr, ctx->elem_index, len);
 
     sqe = io_uring_get_sqe(remote_uring);
     io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);

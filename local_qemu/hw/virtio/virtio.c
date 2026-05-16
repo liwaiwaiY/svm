@@ -835,7 +835,7 @@ static int virtio_queue_packed_empty(VirtQueue *vq)
 int virtio_queue_empty(VirtQueue *vq)
 {
     if (vq->remote_ctx) {
-        return 0;
+        return remote_virtio_queue_empty(vq->remote_ctx);
     }
 
     if (virtio_vdev_has_feature(vq->vdev, VIRTIO_F_RING_PACKED)) {

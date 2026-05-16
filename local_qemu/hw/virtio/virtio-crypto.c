@@ -467,6 +467,7 @@ static void virtio_crypto_init_request(VirtIOCrypto *vcrypto, VirtQueue *vq,
 
 static void virtio_crypto_free_request(VirtIOCryptoReq *req)
 {
+    printf("{virtio_crypto_free_request} clean begin");
     if (!req) {
         return;
     }
@@ -498,6 +499,7 @@ static void virtio_crypto_free_request(VirtIOCryptoReq *req)
 
     g_free(req->in_iov);
     g_free(req);
+    printf("{virtio_crypto_free_request} clean begin");
 }
 
 static void
@@ -973,7 +975,7 @@ static void virtio_crypto_dataq_bh(void *opaque)
 
     /* Just in case the driver is not ready on more */
     // cmsvm
-    if (q->dataq->remote_ctx == NULL) {
+    if (virtqueue_get_remote_ctx(q->dataq) == NULL) {
         if (unlikely(!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK))) {
             printf("{irtio_crypto_handle_dataq_bh} bh driver not ready");
             return;
@@ -991,6 +993,8 @@ static void virtio_crypto_dataq_bh(void *opaque)
             fflush(stdout);
             break;
         }
+        printf("{irtio_crypto_handle_dataq_bh} not empty");
+        fflush(stdout);
 
         virtio_queue_set_notification(q->dataq, 0);
     }
