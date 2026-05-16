@@ -467,7 +467,6 @@ static void virtio_crypto_init_request(VirtIOCrypto *vcrypto, VirtQueue *vq,
 
 static void virtio_crypto_free_request(VirtIOCryptoReq *req)
 {
-    printf("{virtio_crypto_free_request} clean begin");
     if (!req) {
         return;
     }
@@ -499,7 +498,6 @@ static void virtio_crypto_free_request(VirtIOCryptoReq *req)
 
     g_free(req->in_iov);
     g_free(req);
-    printf("{virtio_crypto_free_request} clean begin");
 }
 
 static void
@@ -568,8 +566,6 @@ virtio_crypto_akcipher_input_data_helper(VirtIODevice *vdev,
 
 static void virtio_crypto_req_complete(void *opaque, int ret)
 {
-    printf("{virtio_crypto_req_complete} begin to handle");
-    fflush(stdout);
     VirtIOCryptoReq *req = (VirtIOCryptoReq *)opaque;
     VirtIOCrypto *vcrypto = req->vcrypto;
     VirtIODevice *vdev = VIRTIO_DEVICE(vcrypto);
@@ -829,9 +825,6 @@ virtio_crypto_handle_asym_req(VirtIOCrypto *vcrypto,
 static int
 virtio_crypto_handle_request(VirtIOCryptoReq *request)
 {
-
-    printf("{virtio_crypto_handle_request} begin to handle");
-    fflush(stdout);
     VirtIOCrypto *vcrypto = request->vcrypto;
     VirtIODevice *vdev = VIRTIO_DEVICE(vcrypto);
     VirtQueueElement *elem = &request->elem;
@@ -947,8 +940,6 @@ static void virtio_crypto_handle_dataq(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOCryptoReq *req;
 
     while ((req = virtio_crypto_get_request(vcrypto, vq))) {
-        printf("{virtio_crypto_handle_dataq} read a req");
-        fflush(stdout);
         if (virtio_crypto_handle_request(req) < 0) {
             virtqueue_detach_element(req->vq, &req->elem, 0);
             virtio_crypto_free_request(req);
@@ -959,17 +950,12 @@ static void virtio_crypto_handle_dataq(VirtIODevice *vdev, VirtQueue *vq)
 
 static void virtio_crypto_dataq_bh(void *opaque)
 {
-
-    printf("{irtio_crypto_handle_dataq_bh} bh is called");
-    fflush(stdout);
-
     VirtIOCryptoQueue *q = opaque;
     VirtIOCrypto *vcrypto = q->vcrypto;
     VirtIODevice *vdev = VIRTIO_DEVICE(vcrypto);
 
     /* This happens when device was stopped but BH wasn't. */
     if (!vdev->vm_running) {
-        printf("{irtio_crypto_handle_dataq_bh} vm not running");
         return;
     }
 
@@ -977,7 +963,6 @@ static void virtio_crypto_dataq_bh(void *opaque)
     // cmsvm
     if (virtqueue_get_remote_ctx(q->dataq) == NULL) {
         if (unlikely(!(vdev->status & VIRTIO_CONFIG_S_DRIVER_OK))) {
-            printf("{irtio_crypto_handle_dataq_bh} bh driver not ready");
             return;
         }
     }
@@ -989,18 +974,11 @@ static void virtio_crypto_dataq_bh(void *opaque)
 
         /* Are we done or did the guest add more buffers? */
         if (virtio_queue_empty(q->dataq)) {
-            printf("{irtio_crypto_handle_dataq_bh} empty queue");
-            fflush(stdout);
             break;
         }
-        printf("{irtio_crypto_handle_dataq_bh} not empty");
-        fflush(stdout);
 
         virtio_queue_set_notification(q->dataq, 0);
     }
-
-    printf("{irtio_crypto_handle_dataq_bh} bh is done");
-    fflush(stdout);
 }
 
 static void
@@ -1016,9 +994,6 @@ virtio_crypto_handle_dataq_bh(VirtIODevice *vdev, VirtQueue *vq)
     }
     virtio_queue_set_notification(vq, 0);
     qemu_bh_schedule(q->dataq_bh);
-
-    printf("{irtio_crypto_handle_dataq_bh} register data_bh q");
-    fflush(stdout);
 }
 
 static uint64_t virtio_crypto_get_features(VirtIODevice *vdev,

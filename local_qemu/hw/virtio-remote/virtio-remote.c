@@ -722,6 +722,7 @@ listen_data:
         }
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
+        elem->len = len;
         g_free(buf);
         force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 
@@ -803,9 +804,8 @@ static void* route_to_remote(void *opaque)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(send_uring);
 
-        force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
-                     header[0], header[1], header[2], header[3]);
-        force_printf("[route_to_remote] sent a msg with out_num: %d, in_num: %d", elem->out_num, elem->in_num);
+        force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] wiht [out_num:%d in_num:%d]",
+                     header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
 
         io_uring_wait_cqe(send_uring, &cqe);
         io_uring_cqe_seen(send_uring, cqe);
