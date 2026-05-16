@@ -91,8 +91,11 @@ GHashTable *gsi_ctxes = NULL;
 */
 GHashTable *set_aio = NULL;
 
-static struct io_uring remote_uring_data;
-static struct io_uring *remote_uring = &remote_uring_data;
+static struct io_uring send_uring_data;
+static struct io_uring *send_uring = &send_uring_data;
+
+static struct io_uring resp_uring_data;
+static struct io_uring *resp_uring = &resp_uring_data;
 
 /*
 *  decoupling I/O with strong ordering
@@ -141,14 +144,27 @@ int remote_uring_init(bool remote_stub)
 {
     force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
 
+    gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
+
     if (!remote_stub) { // local_qemu
         gsi_ctxes = g_hash_table_new(g_str_hash, g_str_equal);
-    }
-    gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
-    int ret = io_uring_queue_init(IO_URING_DEPTH, remote_uring, 0);
-    if (ret < 0) {
-        fprintf(stderr, "io_uring init failed\n");
-        return -1;
+        int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
+        if (ret < 0) {
+            fprintf(stderr, "send_uring init failed\n");
+            return -1;
+        }
+        ret = io_uring_queue_init(IO_URING_DEPTH, resp_uring, 0);
+        if (ret < 0) {
+            fprintf(stderr, "resp_uring init failed\n");
+            io_uring_queue_exit(send_uring);
+            return -1;
+        }
+    } else {
+        int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
+        if (ret < 0) {
+            fprintf(stderr, "io_uring init failed\n");
+            return -1;
+        }
     }
     return 0;
 }
@@ -266,17 +282,17 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     };
     force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]", ctx->vq_nr, ctx->elem_index, len);
 
-    sqe = io_uring_get_sqe(remote_uring);
+    sqe = io_uring_get_sqe(send_uring);
     io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
     sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
-    io_uring_submit(remote_uring);
+    io_uring_submit(send_uring);
 
-    io_uring_wait_cqe(remote_uring, &cqe);
-    io_uring_cqe_seen(remote_uring, cqe);
+    io_uring_wait_cqe(send_uring, &cqe);
+    io_uring_cqe_seen(send_uring, cqe);
 
     if (cqe->flags & IORING_CQE_F_MORE) {
-        io_uring_wait_cqe(remote_uring, &cqe);
-        io_uring_cqe_seen(remote_uring, cqe);
+        io_uring_wait_cqe(send_uring, &cqe);
+        io_uring_cqe_seen(send_uring, cqe);
     }
 }
 
@@ -373,23 +389,23 @@ static void remote_stub_read_handler(void *opaque)
     uint8_t *out_buf;
     int read_cnt, vq_nr, index, out_len, in_len;
 
-    if (!remote_uring) {
+    if (!send_uring) {
         return;
     }
 
     read_cnt = 0;
     while (read_cnt < (int)sizeof(req_header)) {
-        sqe = io_uring_get_sqe(remote_uring);
+        sqe = io_uring_get_sqe(send_uring);
         io_uring_prep_recv(sqe, fd, req_header + read_cnt,
                            sizeof(req_header) - read_cnt, 0);
-        io_uring_submit(remote_uring);
-        io_uring_wait_cqe(remote_uring, &cqe);
+        io_uring_submit(send_uring);
+        io_uring_wait_cqe(send_uring, &cqe);
         if (cqe->res <= 0) {
-            io_uring_cqe_seen(remote_uring, cqe);
+            io_uring_cqe_seen(send_uring, cqe);
             goto link_err;
         }
         read_cnt += cqe->res;
-        io_uring_cqe_seen(remote_uring, cqe);
+        io_uring_cqe_seen(send_uring, cqe);
     }
 
     vq_nr  = req_header[0] | (req_header[1] << 8) |
@@ -410,20 +426,20 @@ static void remote_stub_read_handler(void *opaque)
 
     read_cnt = 0;
     while (read_cnt < out_len) {
-        sqe = io_uring_get_sqe(remote_uring);
+        sqe = io_uring_get_sqe(send_uring);
         io_uring_prep_recv(sqe, fd, out_buf + read_cnt,
                            out_len - read_cnt, 0);
-        io_uring_submit(remote_uring);
-        io_uring_wait_cqe(remote_uring, &cqe);
+        io_uring_submit(send_uring);
+        io_uring_wait_cqe(send_uring, &cqe);
         if (cqe->res <= 0) {
-            io_uring_cqe_seen(remote_uring, cqe);
+            io_uring_cqe_seen(send_uring, cqe);
             g_free(out_buf);
             goto link_err;
         }
         read_cnt += cqe->res;
         force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
                      cqe->res, read_cnt, out_len);
-        io_uring_cqe_seen(remote_uring, cqe);
+        io_uring_cqe_seen(send_uring, cqe);
     }
 
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
@@ -659,17 +675,17 @@ listen_begin:
 listen_header:
         phase = 1;
         while (read_cnt < (int)sizeof(resp_header)) {
-            sqe = io_uring_get_sqe(remote_uring);
+            sqe = io_uring_get_sqe(resp_uring);
             io_uring_prep_recv(sqe, stub, resp_header + read_cnt,
                                sizeof(resp_header) - read_cnt, 0);
-            io_uring_submit(remote_uring);
-            io_uring_wait_cqe(remote_uring, &cqe);
+            io_uring_submit(resp_uring);
+            io_uring_wait_cqe(resp_uring, &cqe);
             if (cqe->res <= 0) {
-                io_uring_cqe_seen(remote_uring, cqe);
+                io_uring_cqe_seen(resp_uring, cqe);
                 goto link_err;
             }
             read_cnt += cqe->res;
-            io_uring_cqe_seen(remote_uring, cqe);
+            io_uring_cqe_seen(resp_uring, cqe);
         }
         vq_nr = resp_header[0] | (resp_header[1] << 8) |
                 (resp_header[2] << 16) | (resp_header[3] << 24);
@@ -691,18 +707,18 @@ listen_header:
 listen_data:
         phase = 2;
         while (read_cnt < len) {
-            sqe = io_uring_get_sqe(remote_uring);
+            sqe = io_uring_get_sqe(resp_uring);
             io_uring_prep_recv(sqe, stub, buf + read_cnt, len - read_cnt, 0);
-            io_uring_submit(remote_uring);
-            io_uring_wait_cqe(remote_uring, &cqe);
+            io_uring_submit(resp_uring);
+            io_uring_wait_cqe(resp_uring, &cqe);
             if (cqe->res <= 0) {
-                io_uring_cqe_seen(remote_uring, cqe);
+                io_uring_cqe_seen(resp_uring, cqe);
                 g_free(buf);
                 goto link_err;
             }
             read_cnt += cqe->res;
             force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
-            io_uring_cqe_seen(remote_uring, cqe);
+            io_uring_cqe_seen(resp_uring, cqe);
         }
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
@@ -782,21 +798,21 @@ static void* route_to_remote(void *opaque)
             .msg_iov = msg_sg,
             .msg_iovlen = elem->out_num + 1,
         };
-        sqe = io_uring_get_sqe(remote_uring);
+        sqe = io_uring_get_sqe(send_uring);
         io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
-        io_uring_submit(remote_uring);
+        io_uring_submit(send_uring);
 
         force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
                      header[0], header[1], header[2], header[3]);
         force_printf("[route_to_remote] sent a msg with out_num: %d, in_num: %d", elem->out_num, elem->in_num);
 
-        io_uring_wait_cqe(remote_uring, &cqe);
-        io_uring_cqe_seen(remote_uring, cqe);
+        io_uring_wait_cqe(send_uring, &cqe);
+        io_uring_cqe_seen(send_uring, cqe);
 
         if (cqe->flags & IORING_CQE_F_MORE) {
-            io_uring_wait_cqe(remote_uring, &cqe);
-            io_uring_cqe_seen(remote_uring, cqe);
+            io_uring_wait_cqe(send_uring, &cqe);
+            io_uring_cqe_seen(send_uring, cqe);
         }
 
         g_free(msg_sg);
