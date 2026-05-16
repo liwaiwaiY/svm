@@ -268,9 +268,6 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         io_uring_wait_cqe(remote_uring, &cqe);
         io_uring_cqe_seen(remote_uring, cqe);
     }
-
-    g_free(elem->out_sg[0].iov_base);
-    g_free(elem->in_sg[0].iov_base);
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
@@ -469,7 +466,13 @@ static void remote_stub_read_handler(void *opaque)
 
     force_printf("[remote_stub_read_handler] call handle_output...");
     virtqueue_call_handle_output(vq);
+    force_printf("[remote_stub_read_handler] call bh to handle");
+    aio_bh_poll(qemu_get_aio_context());
 
+    // early free
+    g_free(out_buf);
+    // g_free(msg_sg[0]);
+    g_free(ctx->in_buf);
     // reset remote_ctx
     memset(ctx, 0, sizeof(*ctx));
 
