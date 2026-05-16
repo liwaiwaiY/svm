@@ -105,7 +105,7 @@ typedef struct CommCTX {
     int notified;
     sem_t sem1;
     sem_t sem2;
-    VirtQueueElement *ring;
+    VirtQueueElement **ring;
 } CommCTX;
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
@@ -268,6 +268,9 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         io_uring_wait_cqe(remote_uring, &cqe);
         io_uring_cqe_seen(remote_uring, cqe);
     }
+
+    g_free(elem->out_sg[0].iov_base);
+    g_free(elem->in_sg[0].iov_base);
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
@@ -443,9 +446,11 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_sg[0].iov_len = ctx->out_len;
     ctx->in_sg[0].iov_base = ctx->in_buf;
     ctx->in_sg[0].iov_len = ctx->in_len;
+    force_printf("[remote_stub_read_handler] wrapper ctx [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
+                 vq_nr, index, out_len, in_len);
 
     /*
-    *  basic handle_output framework:
+    *  basic handle_output framework: (aio is the same)
     *  while (elem = virtqueue_pop(vq, sizeof(VirtQueueElement))) {
     *      read(elem->out_sg);
     *      ....
@@ -455,31 +460,16 @@ static void remote_stub_read_handler(void *opaque)
     *  g_free(elem);
     */
 
+    /*
+    *  top-bottom half framework:
+    *  notifier -> vq->handle_output (top half): forbidden notification and qemu_bh_schedule();
+    *           +> reoute_to_remote --> remote_stub_read_handler
+    *                                           -> remain elem and free in push
+    */
+
     force_printf("[remote_stub_read_handler] call handle_output...");
     virtqueue_call_handle_output(vq);
 
-    // early free
-    g_free(out_buf);
-
-    // we let virtqueue_push/virtqueue_fill/virtqueue_flush to send resp
-    // struct iovec msg_sg[2];
-    // VirtQueueElement *elem = (VirtQueueElement *)ctx->elem;
-    // msg_sg[0].iov_base = g_malloc(sizeof(int) * 3);
-    // msg_sg[0].iov_len = sizeof(int) * 3;
-    // msg_sg[0].iov_base[0] = vq_nr;
-    // msg_sg[0].iov_base[1] = index;
-    // msg_sg[0].iov_base[2] = elem->len;
-    // msg_sg[1].iov_base = ctx->in_sg[0].iov_base;
-    // msg_sg[1].iov_len = elem->len;
-    // // send resp
-    // sqe = io_uring_get_sqe(remote_uring);
-    // io_uring_prep_send_zc(sqe, fd, msg_sg, 2, 0);
-    // io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
-    // io_uring_submit(remote_uring);
-    // io_uring_wait_cqe(remote_uring, &cqe);
-
-    // g_free(msg_sg[0]);
-    g_free(ctx->in_buf);
     // reset remote_ctx
     memset(ctx, 0, sizeof(*ctx));
 
@@ -578,8 +568,6 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
 
 static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 {
-    GHashTable *inner = NULL;
-
     // gsi_stubs
     if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
         g_hash_table_remove(gsi_stubs, vdev->name);
@@ -624,7 +612,7 @@ static void* resp_listener(void *opaque)
 {
     ListenerParam *param = (ListenerParam *)opaque;
     VirtIODevice *vdev = param->vdev;
-    VirtQueue *vq = opaque->vq;
+    VirtQueue *vq = param->vq;
     int stub = param->stub;
     CommCTX *comm_ctx = param->comm_ctx;
     g_free(opaque);
@@ -719,8 +707,6 @@ done:
     sem_post(&comm_ctx->sem2);
     return NULL;
 
-hash_err:
-    return NULL;
 link_err:
     if (!reconnect_tcp_socket(stub)) {
         if (buf)
@@ -745,7 +731,7 @@ elem_err:
 typedef struct SenderParam {
     VirtQueue *vq;
     int stub;
-    CommCTX *comm_ctx
+    CommCTX *comm_ctx;
 } SenderParam;
 
 static void* route_to_remote(void *opaque)
@@ -762,7 +748,7 @@ static void* route_to_remote(void *opaque)
 
     force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_name(vq));
 
-    while (elem = virtqueue_pop(vq, sizeof(VirtQueueElement))) {
+    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
         struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
         int header[4];
@@ -812,6 +798,8 @@ static void* route_to_remote(void *opaque)
 
     qatomic_set(&comm_ctx->sending, false);
     sem_post(&comm_ctx->sem1);
+
+    return NULL;
 }
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
@@ -828,7 +816,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, vdev->name);
-        comm_ctx->ring = g_new0(int, RING_SIZE);
+        comm_ctx->ring = g_new0(VirtQueueElement *, RING_SIZE);
         // reset
         comm_ctx->sending = comm_ctx->recving = true;
         comm_ctx->sent = comm_ctx->recved  = comm_ctx->notified = 0;
@@ -885,9 +873,9 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
     }
 }
 
-void virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
+void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 {
-    VirtQueue *vq = container_of(n, VirtQueue, host_notifier);
+    VirtQueue *vq = host_notifier_to_vq(n);
 
     remote_virtio_queue_notify_vq(vq);
 }

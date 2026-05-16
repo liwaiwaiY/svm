@@ -44,7 +44,7 @@ bool check_virtio_device_remote(VirtIODevice *vdev);
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev);
 void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 void remote_virtio_queue_host_notifier_read(EventNotifier *n);
-void virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n);
+void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n);
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp);
 void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port,Error **errp);
 int remote_uring_init(bool remote_stub);
