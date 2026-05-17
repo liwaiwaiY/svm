@@ -571,7 +571,7 @@ static void remote_stub_read_handler(void *opaque)
     *                                           -> remain elem and free in push
     */
 
-    force_printf("[remote_stub_read_handler] call handle_output...");
+    force_printf("[remote_stub_read_handler] call handle_output at[%p]", virtqueue_get_handle_output(vq));
     virtqueue_call_handle_output(vq);
     force_printf("[remote_stub_read_handler] call bh to handle");
     aio_bh_poll(qemu_get_aio_context());

@@ -1014,6 +1014,8 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
     MultiReqBuffer mrb = {};
     bool suppress_notifications = virtio_queue_get_notification(vq);
 
+    printf("[virtio_blk_handle_vq]\n");
+
     defer_call_begin();
 
     do {
@@ -1021,12 +1023,16 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
             virtio_queue_set_notification(vq, 0);
         }
 
+        printf("[virtio-blk-handle-vq] start to handle.\n");
+        fflush(stdout);
         while ((req = virtio_blk_get_request(s, vq))) {
             if (virtio_blk_handle_request(req, &mrb)) {
                 virtqueue_detach_element(req->vq, &req->elem, 0);
                 g_free(req);
                 break;
             }
+            printf("[virtio-blk-handle-vq] next one.\n");
+            fflush(stdout); 
         }
 
         if (suppress_notifications) {

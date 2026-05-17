@@ -247,6 +247,7 @@ struct VirtioDeviceClass {
 };
 
 // cmsvm
+typedef void (*VirtIOHandleOutput)(VirtIODevice *, VirtQueue *);
 void virtqueue_set_remote_ctx(VirtQueue *vq, void *ctx);
 void *virtqueue_get_remote_ctx(VirtQueue *vq);
 void virtqueue_call_handle_output(VirtQueue *vq);
@@ -255,6 +256,7 @@ hwaddr virtqueue_get_vring_desc(VirtQueue *vq);
 EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq);
 VirtIODevice *virtqueue_get_vdev(VirtQueue *vq);
 VirtQueue *host_notifier_to_vq(EventNotifier *n);
+VirtIOHandleOutput virtqueue_get_handle_output(VirtQueue *vq);
 
 void virtio_instance_init_common(Object *proxy_obj, void *data,
                                  size_t vdev_size, const char *vdev_name);
