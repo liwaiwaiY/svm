@@ -815,12 +815,21 @@ listen_data:
         }
         printf("\n");
         fflush(stdout);
-        iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
+        // iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
+        // we copy ourselves
+        int copied = 0;
+        for (int i = 0; i < elem->in_num && copied < len; i++) {
+            int delta = MIN(elem->in_sg[i].iov_len, len - copied);
+            memcpy(elem->in_sg[i].iov_base, buf + copied, delta);
+            log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
+                             elem->in_sg + i, 1);
+            log_hex_dump(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
+                         (uint8_t *)(buf + copied), delta);
+            copied += delta;
+        }
+        force_printf("[-------] we copied %d", copied);
+
         elem->len = len;
-        force_printf("[!!!!!] begin to print elem at [ptr:%p, len:%d]", elem->in_sg, elem->len);
-        log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV",
-                     0,
-                     elem->in_sg, elem->in_num);
         g_free(buf);
         force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 

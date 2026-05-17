@@ -38,26 +38,6 @@ size_t iov_from_buf_full(const struct iovec *iov, unsigned int iov_cnt,
 size_t iov_to_buf_full(const struct iovec *iov, const unsigned int iov_cnt,
                        size_t offset, void *buf, size_t bytes);
 
-// static inline size_t
-// iov_from_buf(const struct iovec *iov, unsigned int iov_cnt,
-//              size_t offset, const void *buf, size_t bytes)
-// {
-//     printf("!!! iov_from_buf to copy at [iov:%p, iov_cnt:%d, offset:%d, buf:%p, bytes:%d]\n",
-//          iov, iov_cnt, offset, buf, bytes);
-//     fflush(stdout);
-//     if (__builtin_constant_p(bytes) && iov_cnt &&
-//         offset <= iov[0].iov_len && bytes <= iov[0].iov_len - offset) {
-//         printf("!!! iov_from_buf directly memcpy\n");
-//         fflush(stdout);
-//         memcpy(iov[0].iov_base + offset, buf, bytes);
-//         return bytes;
-//     } else {
-//         printf("!!! iov_from_buf call full\n");
-//         fflush(stdout);
-//         return iov_from_buf_full(iov, iov_cnt, offset, buf, bytes);
-//     }
-// }
-// 
 static inline size_t
 iov_from_buf(const struct iovec *iov, unsigned int iov_cnt,
              size_t offset, const void *buf, size_t bytes)
