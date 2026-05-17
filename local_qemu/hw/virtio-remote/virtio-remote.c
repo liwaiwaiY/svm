@@ -973,8 +973,13 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
                 break;
             // handle a notification
             virtio_notify(virtqueue_get_vdev(vq), vq);
+            g_free(comm_ctx->ring[comm_ctx->notified % RING_SIZE]);
+
             comm_ctx->notified++;
         }
+
+        g_free(listen_param);
+        g_free(sender_param);
 
         sem_destroy(&comm_ctx->sem1);
         sem_destroy(&comm_ctx->sem2);
