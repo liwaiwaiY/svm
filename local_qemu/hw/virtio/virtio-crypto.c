@@ -564,6 +564,31 @@ virtio_crypto_akcipher_input_data_helper(VirtIODevice *vdev,
     req->in_len = sizeof(struct virtio_crypto_inhdr) + asym_op_info->dst_len;
 }
 
+
+static void log_hex_dump_iov(const char *filepath, const char *prefix,
+                             int seq, struct iovec *iov, int iov_cnt)
+{
+    FILE *f = fopen(filepath, "a");
+    int total = 0, i = 0, off = 0;
+    if (!f) return;
+
+    for (int k = 0; k < iov_cnt; k++)
+        total += iov[k].iov_len;
+
+    fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
+    while (i < iov_cnt) {
+        for (int col = 0; col < 32 && i < iov_cnt; col++) {
+            uint8_t *p = (uint8_t *)iov[i].iov_base;
+            fprintf(f, "%02x ", p[off]);
+            off++;
+            if (off >= (int)iov[i].iov_len) { i++; off = 0; }
+        }
+        fprintf(f, "\n");
+    }
+    fflush(f);
+    fclose(f);
+}
+
 static void virtio_crypto_req_complete(void *opaque, int ret)
 {
     VirtIOCryptoReq *req = (VirtIOCryptoReq *)opaque;
@@ -579,6 +604,11 @@ static void virtio_crypto_req_complete(void *opaque, int ret)
                                              req->op_info.u.asym_op_info);
     }
     stb_p(&req->in->status, status);
+
+    printf("[!!!!!!] now we push elem with total len [%zu]\n", req->in_len);
+    log_hex_dump_iov("/home/waiai/SvmExp/local/svm/log/crypto.log", "", 0,
+                     req->elem.in_sg, req->elem.in_num);
+
     virtqueue_push(req->vq, &req->elem, req->in_len);
     virtio_notify(vdev, req->vq);
     virtio_crypto_free_request(req);
@@ -588,6 +618,14 @@ static VirtIOCryptoReq *
 virtio_crypto_get_request(VirtIOCrypto *s, VirtQueue *vq)
 {
     VirtIOCryptoReq *req = virtqueue_pop(vq, sizeof(VirtIOCryptoReq));
+
+
+    printf("[!!!!!] we get info in elemets:\n");
+
+    for (int i = 0; i < req->elem.in_num; i++) {
+        printf("[!!!!!!] elem [%d] with len [%zu]\n", i, req->elem.in_sg[i].iov_len);
+        fflush(stdout);
+    }
 
     if (req) {
         virtio_crypto_init_request(s, vq, req);
