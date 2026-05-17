@@ -321,7 +321,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
         ret->out_sg[i] = ctx->out_sg[i];
     }
     for (i = 0; i < in_num; i++) {
-        ret->out_addr[i] = 0;
+        ret->in_addr[i] = 0;
         ret->in_sg[i] = ctx->in_sg[i];
     }
     // record element
