@@ -807,14 +807,6 @@ listen_data:
         log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV",
                      atomic_fetch_add(&local_recv_seq, 1) + 1,
                      (uint8_t *)buf, len);
-        // write resp to in_sg
-        force_printf("[?????] begin copy elem index [%d] but need index [%d]", elem->index, index);
-        printf("[------] ");
-        for (int i = 0; i < elem->in_num; i++) {
-            printf("{iov[%d] with len [%zu]} ", i, elem->in_sg[i].iov_len);
-        }
-        printf("\n");
-        fflush(stdout);
         // iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         // we copy ourselves
         int copied = 0;
@@ -827,7 +819,6 @@ listen_data:
                          (uint8_t *)(buf + copied), delta);
             copied += delta;
         }
-        force_printf("[-------] we copied %d", copied);
 
         elem->len = len;
         g_free(buf);
