@@ -810,6 +810,10 @@ listen_data:
         // write resp to in_sg
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         elem->len = len;
+        force_printf("[!!!!!] begin to print elem at [ptr:%p, len:%d]", elem->in_sg, elem->len);
+        log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV",
+                     0,
+                     elem->in_sg, elem->len);
         g_free(buf);
         force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 
