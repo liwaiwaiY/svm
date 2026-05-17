@@ -606,7 +606,7 @@ static void virtio_crypto_req_complete(void *opaque, int ret)
     stb_p(&req->in->status, status);
 
     printf("[!!!!!!] now we push elem with total len [%zu]\n", req->in_len);
-    log_hex_dump_iov("/home/waiai/SvmExp/local/svm/log/crypto-in.log", "", 0,
+    log_hex_dump_iov("/home/waiai/SvmExp/local/svm/log/crypto-in.log", "", req->in_len,
                      req->elem.in_sg, req->elem.in_num);
 
     virtqueue_push(req->vq, &req->elem, req->in_len);
@@ -624,7 +624,12 @@ virtio_crypto_get_request(VirtIOCrypto *s, VirtQueue *vq)
 
         log_hex_dump_iov("/home/waiai/SvmExp/local/svm/log/crypto-out.log", "", 0,
                      req->elem.out_sg, req->elem.out_num);
-       virtio_crypto_init_request(s, vq, req);
+        printf("[!!!!!] let's set 0 for in_sg");
+
+        for(int i =0; i < req->elem.in_num; i++)
+            memset(req->elem.in_sg[i].iov_base, 0, req->elem.in_sg[i].iov_len);
+
+        virtio_crypto_init_request(s, vq, req);
     }
     return req;
 }
