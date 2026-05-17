@@ -348,9 +348,12 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     };
     force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]", ctx->vq_nr, ctx->elem_index, len);
 
-    log_hex_dump_iov(REMOTE_LOG_DIR "/send.log", "SEND",
+    log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
                      atomic_fetch_add(&remote_send_seq, 1) + 1,
-                     resp_iov, 2);
+                     resp_iov, 1);
+    log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND",
+                     atomic_fetch_add(&remote_send_seq, 1) + 1,
+                     resp_iov + 1, 1);
 
     sqe = io_uring_get_sqe(send_uring);
     io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
@@ -478,7 +481,7 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_cqe_seen(send_uring, cqe);
     }
 
-    log_hex_dump(REMOTE_LOG_DIR "/recv.log", "RECV_HDR",
+    log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV_HDR",
                  atomic_fetch_add(&remote_recv_seq, 1) + 1,
                  req_header, sizeof(req_header));
 
@@ -516,7 +519,7 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_cqe_seen(send_uring, cqe);
     }
 
-    log_hex_dump(REMOTE_LOG_DIR "/recv.log", "RECV",
+    log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
                  atomic_fetch_add(&remote_recv_seq, 1) + 1,
                  out_buf, out_len);
 
@@ -765,7 +768,7 @@ listen_header:
             read_cnt += cqe->res;
             io_uring_cqe_seen(resp_uring, cqe);
         }
-        log_hex_dump(LOCAL_LOG_DIR "/recv.log", "RECV_HDR",
+        log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV_HDR",
                      atomic_fetch_add(&local_recv_seq, 1) + 1,
                      resp_header, sizeof(resp_header));
         vq_nr = resp_header[0] | (resp_header[1] << 8) |
@@ -801,7 +804,7 @@ listen_data:
             force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
             io_uring_cqe_seen(resp_uring, cqe);
         }
-        log_hex_dump(LOCAL_LOG_DIR "/recv.log", "RECV",
+        log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV",
                      atomic_fetch_add(&local_recv_seq, 1) + 1,
                      (uint8_t *)buf, len);
         // write resp to in_sg
@@ -891,9 +894,12 @@ static void* route_to_remote(void *opaque)
         force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] wiht [out_num:%d in_num:%d]",
                      header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
 
-        log_hex_dump_iov(LOCAL_LOG_DIR "/send.log", "SEND",
+        log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
                          atomic_fetch_add(&local_send_seq, 1) + 1,
-                         msg_sg, elem->out_num + 1);
+                         msg_sg, 1);
+        log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
+                         atomic_fetch_add(&local_send_seq, 1) + 1,
+                         msg_sg + 1, elem->out_num);
 
         io_uring_wait_cqe(send_uring, &cqe);
         io_uring_cqe_seen(send_uring, cqe);
