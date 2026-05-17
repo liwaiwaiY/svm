@@ -78,20 +78,15 @@ static void log_hex_dump(const char *filepath, const char *prefix,
                          int seq, const uint8_t *data, int len)
 {
     FILE *f = fopen(filepath, "a");
-    int dump_len;
     if (!f) return;
 
-    if (len < 32) {
-        dump_len = len;
-    } else {
-        dump_len = 32;
+    fprintf(f, "[%s #%d] len=%d:\n", prefix, seq, len);
+    for (int off = 0; off < len; off += 32) {
+        int n = len - off < 32 ? len - off : 32;
+        for (int i = 0; i < n; i++)
+            fprintf(f, "%02x ", data[off + i]);
+        fprintf(f, "\n");
     }
-
-    fprintf(f, "[%s #%d] len=%d: ", prefix, seq, len);
-    for (int i = 0; i < dump_len; i++) {
-        fprintf(f, "%02x ", data[i]);
-    }
-    fprintf(f, "\n");
     fflush(f);
     fclose(f);
 }
@@ -100,25 +95,21 @@ static void log_hex_dump_iov(const char *filepath, const char *prefix,
                              int seq, struct iovec *iov, int iov_cnt)
 {
     FILE *f = fopen(filepath, "a");
-    int total = 0;
-    int printed = 0;
+    int total = 0, i = 0, off = 0;
     if (!f) return;
 
-    for (int i = 0; i < iov_cnt; i++) {
-        total += iov[i].iov_len;
-    }
+    for (int k = 0; k < iov_cnt; k++)
+        total += iov[k].iov_len;
 
     fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
-    for (int i = 0; i < iov_cnt && printed < 32; i++) {
-        uint8_t *p = (uint8_t *)iov[i].iov_base;
-        int n = iov[i].iov_len;
-        if (n > 32 - printed) n = 32 - printed;
-        fprintf(f, "  iov[%d](%d): ", i, (int)iov[i].iov_len);
-        for (int j = 0; j < n; j++) {
-            fprintf(f, "%02x ", p[j]);
+    while (i < iov_cnt) {
+        for (int col = 0; col < 32 && i < iov_cnt; col++) {
+            uint8_t *p = (uint8_t *)iov[i].iov_base;
+            fprintf(f, "%02x ", p[off]);
+            off++;
+            if (off >= (int)iov[i].iov_len) { i++; off = 0; }
         }
         fprintf(f, "\n");
-        printed += n;
     }
     fflush(f);
     fclose(f);
@@ -977,9 +968,6 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 
             comm_ctx->notified++;
         }
-
-        g_free(listen_param);
-        g_free(sender_param);
 
         sem_destroy(&comm_ctx->sem1);
         sem_destroy(&comm_ctx->sem2);
