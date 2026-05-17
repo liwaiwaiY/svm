@@ -808,6 +808,13 @@ listen_data:
                      atomic_fetch_add(&local_recv_seq, 1) + 1,
                      (uint8_t *)buf, len);
         // write resp to in_sg
+        force_printf("[?????] begin copy elem index [%d] but need index [%d]", elem->index, index);
+        printf("[------] ");
+        for (int i = 0; i < elem->in_num; i++) {
+            printf("{iov[%d] with len [%zu]} ", i, elem->in_sg[i].iov_len);
+        }
+        printf("\n");
+        fflush(stdout);
         iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         elem->len = len;
         force_printf("[!!!!!] begin to print elem at [ptr:%p, len:%d]", elem->in_sg, elem->len);
