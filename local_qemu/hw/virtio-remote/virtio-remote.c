@@ -647,6 +647,13 @@ static void remote_stub_accept_handler(void *opaque)
 
 void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
 {
+    // TODO : add a new property to set id
+    if (!DEVICE(vdev)->id) {
+        force_printf("[init_remote_virtio_device_sockets] create id\n");
+        DEVICE(vdev)->id = g_new0(char, strlen(vdev->name));
+        memcpy(DEVICE(vdev)->id, vdev->name, strlen(vdev->name));
+    }
+
     force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
 
     int port = atoi(str_port);
