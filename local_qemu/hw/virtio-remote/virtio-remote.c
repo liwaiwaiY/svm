@@ -134,14 +134,14 @@ static void log_init_remote(void)
 }
 
 /*
-*  format: <K:vdev->name, V:int>
+*  format: <K:DEVICE(vdev)->id, V:int>
 *  local_qemu: a link head of sockets of each vq
 *  remote_stub: a socket of listening
 */
 GHashTable *gsi_stubs = NULL;
 
 /*
-*  format: <K:vdev->name, V:CommCTX*>
+*  format: <K:DEVICE(vdev)->id, V:CommCTX*>
 *  local_qemu: a hash table of sent elements
 *  remote_qemu: none
 */
@@ -149,7 +149,7 @@ GHashTable *gsi_stubs = NULL;
 GHashTable *gsi_ctxes = NULL;
 
 /*
-*  format: <K:vdev->name, V:Bool>
+*  format: <K:DEVICE(vdev)->id, V:Bool>
 *  local_qemu: aio list
 *  remote_stub: none
 */
@@ -179,21 +179,21 @@ bool check_virtio_device_remote(VirtIODevice *vdev)
 {
     if (!gsi_stubs)
         return false;
-    return g_hash_table_contains(gsi_stubs, vdev->name);
+    return g_hash_table_contains(gsi_stubs, DEVICE(vdev)->id);
 }
 
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
 {
     if (!set_aio)
         return false;
-    return g_hash_table_contains(set_aio, vdev->name);
+    return g_hash_table_contains(set_aio, DEVICE(vdev)->id);
 }
 
 void remote_virtio_register_aio(VirtIODevice *vdev)
 {
     if (!set_aio)
         set_aio = g_hash_table_new(g_str_hash, g_str_equal);
-    g_hash_table_insert(set_aio, (gpointer)(vdev->name), GINT_TO_POINTER(0));
+    g_hash_table_insert(set_aio, DEVICE(vdev)->id, GINT_TO_POINTER(0));
 }
 
 static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
@@ -327,7 +327,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 */
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
-    force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_name(vq));
+    force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
     if (len == 0)
         return;
 
@@ -391,7 +391,13 @@ bool remote_virtio_notify_skip(VirtIODevice *vdev)
 
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
 {
-    force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", vdev->name, ip_port);
+    if (!DEVICE(vdev)->id) {
+        force_printf("[init_remote_virtio_device_sockets] create id\n");
+        DEVICE(vdev)->id = g_new0(char, strlen(vdev->name));
+        memcpy(DEVICE(vdev)->id, vdev->name, strlen(vdev->name));
+    }
+
+    force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", DEVICE(vdev)->id, ip_port);
 
     // get ip and port
     char ip[64];
@@ -434,7 +440,7 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     }
     // long-term usage (kernel automatically send hearbeats)
     enable_tcp_keepalive(fd);
-    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(fd));
+    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
     return;
 
 err_connect:
@@ -455,9 +461,9 @@ err_sock:
 static void remote_stub_read_handler(void *opaque)
 {
     VirtIODevice *vdev = opaque;
-    force_printf("[remote_stub_read_handler] for vdev %s", vdev->name);
+    force_printf("[remote_stub_read_handler] for vdev %s", DEVICE(vdev)->id);
 
-    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
     if (fd < 0) {
         return;
     }
@@ -532,7 +538,7 @@ static void remote_stub_read_handler(void *opaque)
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
     if (!vq) {
         force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
-                     vq_nr, vdev->name);
+                     vq_nr, DEVICE(vdev)->id);
         g_free(out_buf);
         return;
     }
@@ -606,7 +612,7 @@ static void remote_stub_read_handler(void *opaque)
 link_err:
     qemu_set_fd_handler(fd, NULL, NULL, NULL);
     close(fd);
-    g_hash_table_remove(gsi_stubs, vdev->name);
+    g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
 }
 
 static void remote_stub_accept_handler(void *opaque)
@@ -614,7 +620,7 @@ static void remote_stub_accept_handler(void *opaque)
     force_printf("[remote_stub_accept_handler] Begin to connect ...");
 
     VirtIODevice *vdev = opaque;
-    int listen_fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+    int listen_fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
 
     if (listen_fd < 0) {
         return;
@@ -624,24 +630,24 @@ static void remote_stub_accept_handler(void *opaque)
     if (fd < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             error_report("remote stub accept failed for vdev %s: %s",
-                         vdev->name, strerror(errno));
+                         DEVICE(vdev)->id, strerror(errno));
         }
         return;
     }
 
     qemu_set_fd_handler(listen_fd, NULL, NULL, NULL);
-    g_hash_table_remove(gsi_stubs, vdev->name);
+    g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
     close(listen_fd);
     enable_tcp_keepalive(fd);
-    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(fd));
+    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
 
     qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
-    force_printf("connected for dev %s", vdev->name);
+    force_printf("connected for dev %s", DEVICE(vdev)->id);
 }
 
 void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
 {
-    force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", vdev->name, str_port);
+    force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
 
     int port = atoi(str_port);
 
@@ -685,7 +691,7 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
         virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
     }
 
-    g_hash_table_insert(gsi_stubs, (gpointer)vdev->name, GUINT_TO_POINTER(listen_fd));
+    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(listen_fd));
     /*
     *  we think it is okay to put the listen resp in main-loop, as the local_qemu can only
     *  connect server after remote_stub is started.
@@ -696,21 +702,21 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
 static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
 {
     // gsi_stubs
-    if (g_hash_table_lookup(gsi_stubs, vdev->name)) {
-        g_hash_table_remove(gsi_stubs, vdev->name);
+    if (g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id)) {
+        g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
     }
     // gsi_elems + gsi_ctxes
-    if (g_hash_table_lookup(gsi_ctxes, vdev->name)) {
-        g_hash_table_remove(gsi_ctxes, vdev->name);
+    if (g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id)) {
+        g_hash_table_remove(gsi_ctxes, DEVICE(vdev)->id);
     }
     // set_aio
-    if (set_aio && g_hash_table_contains(set_aio, vdev->name))
-        g_hash_table_remove(set_aio, vdev->name);
+    if (set_aio && g_hash_table_contains(set_aio, DEVICE(vdev)->id))
+        g_hash_table_remove(set_aio, DEVICE(vdev)->id);
 }
 
 static void close_remote_virtio_device_sockets(VirtIODevice *vdev)
 {
-    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
     if (fd >= 0) {
         qemu_set_fd_handler(fd, NULL, NULL, NULL);
         close(fd);
@@ -751,7 +757,7 @@ static void* resp_listener(void *opaque)
     VirtQueueElement *elem;
     char *buf = NULL;
 
-    force_printf("[resp_listener] to listener resps for vdev %s", vdev->name);
+    force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
 
     while (true) {
 listen_begin:
@@ -891,7 +897,7 @@ static void* route_to_remote(void *opaque)
     struct io_uring_cqe *cqe;
     int vq_nr = virtio_get_queue_index(vq);
 
-    force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_name(vq));
+    force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
@@ -956,17 +962,17 @@ static void* route_to_remote(void *opaque)
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 {
     force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
-                 virtio_get_queue_index(vq), virtqueue_get_vdev_name(vq));
+                 virtio_get_queue_index(vq), virtqueue_get_vdev_id(vq));
     if (virtqueue_get_vring_desc(vq)) {
         VirtIODevice *vdev = virtqueue_get_vdev(vq);
-        int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, vdev->name));
+        int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
 
         if (unlikely(vdev->broken)) {
             return;
         }
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, vdev->name);
+        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
         comm_ctx->ring = g_new0(VirtQueueElement *, RING_SIZE);
         // reset
         comm_ctx->sending = comm_ctx->recving = true;
@@ -1020,7 +1026,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 // so we can left meta data of vring in local machine, send elem to remote
 void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 {
-    remote_uring_init(false);
+    force_printf("notify rea\n");
     VirtQueue *vq = host_notifier_to_vq(n);
     if (event_notifier_test_and_clear(n)) {
         remote_virtio_queue_notify_vq(vq);
@@ -1029,7 +1035,7 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 
 void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 {
-    remote_uring_init(false);
+    force_printf("poll_ready\n");
     VirtQueue *vq = host_notifier_to_vq(n);
 
     remote_virtio_queue_notify_vq(vq);
@@ -1037,10 +1043,10 @@ void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
-    force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", vdev->name);
-    if (!g_hash_table_lookup(gsi_ctxes, vdev->name)) {
+    force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", DEVICE(vdev)->id);
+    if (!g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id)) {
         CommCTX *comm_ctx = g_new0(CommCTX, 1);
-        g_hash_table_insert(gsi_ctxes, (gpointer)vdev->name, comm_ctx);
+        g_hash_table_insert(gsi_ctxes, (gpointer)DEVICE(vdev)->id, comm_ctx);
     }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));

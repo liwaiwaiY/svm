@@ -251,7 +251,7 @@ typedef void (*VirtIOHandleOutput)(VirtIODevice *, VirtQueue *);
 void virtqueue_set_remote_ctx(VirtQueue *vq, void *ctx);
 void *virtqueue_get_remote_ctx(VirtQueue *vq);
 void virtqueue_call_handle_output(VirtQueue *vq);
-const char *virtqueue_get_vdev_name(VirtQueue *vq);
+const char *virtqueue_get_vdev_id(VirtQueue *vq);
 hwaddr virtqueue_get_vring_desc(VirtQueue *vq);
 EventNotifier *virtqueue_get_host_notifier(VirtQueue *vq);
 VirtIODevice *virtqueue_get_vdev(VirtQueue *vq);

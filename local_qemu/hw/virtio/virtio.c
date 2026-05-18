@@ -228,9 +228,9 @@ VirtIOHandleOutput virtqueue_get_handle_output(VirtQueue *vq)
     return vq->handle_output;
 }
 
-const char* virtqueue_get_vdev_name(VirtQueue *vq)
+const char* virtqueue_get_vdev_id(VirtQueue *vq)
 {
-    return vq->vdev->name;
+    return DEVICE(vq->vdev)->id;
 }
 
 VirtIODevice *virtqueue_get_vdev(VirtQueue *vq)
