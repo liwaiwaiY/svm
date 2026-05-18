@@ -219,7 +219,6 @@ void* virtqueue_get_remote_ctx(VirtQueue *vq)
 void virtqueue_call_handle_output(VirtQueue *vq)
 {
     if (vq->handle_output) {
-        printf("[!!!] call");
         vq->handle_output(vq->vdev, vq);
     }
 }

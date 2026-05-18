@@ -335,18 +335,19 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     int resp_header[3];
 
     resp_header[0] = ctx->vq_nr;
-    resp_header[1] = ctx->elem_index;
+    resp_header[1] = elem->index;
     resp_header[2] = len;
 
     struct iovec resp_iov[2] = {
         { .iov_base = resp_header,     .iov_len = sizeof(resp_header) },
-        { .iov_base = ctx->in_buf,      .iov_len = len },
+        { .iov_base = elem->in_sg[0].iov_base,      .iov_len = len },
     };
     struct msghdr msg = {
         .msg_iov = resp_iov,
         .msg_iovlen = 2,
     };
-    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]", ctx->vq_nr, ctx->elem_index, len);
+    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]",
+                 resp_header[0], resp_header[1], resp_header[2]);
 
     log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
                      atomic_fetch_add(&remote_send_seq, 1) + 1,
@@ -367,6 +368,9 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         io_uring_wait_cqe(send_uring, &cqe);
         io_uring_cqe_seen(send_uring, cqe);
     }
+
+    g_free(elem->out_sg[0].iov_base);
+    g_free(elem->in_sg[0].iov_base);
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
@@ -533,9 +537,12 @@ static void remote_stub_read_handler(void *opaque)
     force_printf("[remote_stub_read_handler] found vq");
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    if (!ctx->resp_fd) { // first called
+        ctx->resp_fd = fd;
+        ctx->vq_nr = vq_nr;
+    }
 
-    ctx->resp_fd = fd;
-    ctx->vq_nr = vq_nr;
+    // elem-specific
     ctx->elem_index = index;
     ctx->out_len = out_len;
     ctx->in_len = in_len;
@@ -576,12 +583,20 @@ static void remote_stub_read_handler(void *opaque)
     force_printf("[remote_stub_read_handler] call bh to handle");
     aio_bh_poll(qemu_get_aio_context());
 
+    // test to free in push
     // early free
-    g_free(out_buf);
-    // g_free(msg_sg[0]);
-    g_free(ctx->in_buf);
+    // g_free(out_buf);
+    // g_free(ctx->in_buf);
     // reset remote_ctx
-    memset(ctx, 0, sizeof(*ctx));
+    ctx->elem_index = 0;
+    ctx->out_len = 0;
+    ctx->in_len = 0;
+    ctx->out_buf = NULL;
+    ctx->in_buf = NULL;
+    ctx->out_sg[0].iov_base = NULL;
+    ctx->out_sg[0].iov_len = 0;
+    ctx->in_sg[0].iov_base = NULL;
+    ctx->in_sg[0].iov_len = 0;
 
     force_printf("[remote_stub_read_handler] return");
     return;

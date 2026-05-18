@@ -56,6 +56,9 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
 {
+    printf("[virtio_blk_req_complete] is called\n");
+    fflush(stdout);
+
     VirtIOBlock *s = req->dev;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
@@ -64,6 +67,8 @@ void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
     stb_p(&req->in->status, status);
     iov_discard_undo(&req->inhdr_undo);
     iov_discard_undo(&req->outhdr_undo);
+    printf("[virtio_blk_req_complete] call push\n");
+    fflush(stdout);
     virtqueue_push(req->vq, &req->elem, req->in_len);
     virtio_notify(vdev, req->vq);
 }
@@ -820,6 +825,8 @@ out:
 
 static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
 {
+    printf("[virtio_blk_handle_request] is called \n");
+    fflush(stdout);
     uint32_t type;
     struct iovec *in_iov = req->elem.in_sg;
     struct iovec *out_iov = req->elem.out_sg;
@@ -1014,8 +1021,6 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
     MultiReqBuffer mrb = {};
     bool suppress_notifications = virtio_queue_get_notification(vq);
 
-    printf("[virtio_blk_handle_vq]\n");
-
     defer_call_begin();
 
     do {
@@ -1023,16 +1028,12 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
             virtio_queue_set_notification(vq, 0);
         }
 
-        printf("[virtio-blk-handle-vq] start to handle.\n");
-        fflush(stdout);
         while ((req = virtio_blk_get_request(s, vq))) {
             if (virtio_blk_handle_request(req, &mrb)) {
                 virtqueue_detach_element(req->vq, &req->elem, 0);
                 g_free(req);
                 break;
             }
-            printf("[virtio-blk-handle-vq] next one.\n");
-            fflush(stdout); 
         }
 
         if (suppress_notifications) {
@@ -1044,14 +1045,17 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
         virtio_blk_submit_multireq(s, &mrb);
     }
 
+    printf("[virtio_blk_handle_vq] call defer calls\n");
     defer_call_end();
+    printf("[virtio_blk_handle_vq] done with defer fall\n");
 }
 
 static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBlock *s = (VirtIOBlock *)vdev;
 
-    if (!s->ioeventfd_disabled && !s->ioeventfd_started) {
+    // cmsvm: need to pass this pld logic
+    if (!virtqueue_get_remote_ctx(vq) && !s->ioeventfd_disabled && !s->ioeventfd_started) {
         /* Some guests kick before setting VIRTIO_CONFIG_S_DRIVER_OK so start
          * ioeventfd here instead of waiting for .set_status().
          */
