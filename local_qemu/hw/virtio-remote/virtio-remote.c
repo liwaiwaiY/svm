@@ -206,6 +206,8 @@ static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
 
 int remote_uring_init(bool remote_stub)
 {
+    if (gsi_stubs)
+        return 0;
     force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
 
     gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
@@ -1018,6 +1020,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 // so we can left meta data of vring in local machine, send elem to remote
 void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 {
+    remote_uring_init(false);
     VirtQueue *vq = host_notifier_to_vq(n);
     if (event_notifier_test_and_clear(n)) {
         remote_virtio_queue_notify_vq(vq);
@@ -1026,6 +1029,7 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 
 void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 {
+    remote_uring_init(false);
     VirtQueue *vq = host_notifier_to_vq(n);
 
     remote_virtio_queue_notify_vq(vq);

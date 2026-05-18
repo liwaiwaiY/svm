@@ -4274,6 +4274,10 @@ static const Property virtio_properties[] = {
 
 static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
+    if (check_virtio_device_remote(vdev)) {
+        return remote_virtio_device_start_ioeventfd_impl(vdev);
+    }
+
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
 
@@ -4344,6 +4348,10 @@ int virtio_device_start_ioeventfd(VirtIODevice *vdev)
 
 static void virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
 {
+    if (check_virtio_device_remote(vdev)) {
+        return remote_virtio_device_stop_ioeventfd_impl(vdev);
+    }
+
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int n, r;
 
@@ -4395,9 +4403,11 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
 // cmsvm
 static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
 {
-    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
-    vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
-    vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
+    // cmsvm: these pointers are share among the same virtio devices
+    // for virtio-blk, we cannot move the system ssd to remote. therefore wee need intercept in fucntions
+    // VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
+    // vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
+    // vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
     remote_uring_init(false);
     init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
 }
