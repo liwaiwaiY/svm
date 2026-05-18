@@ -533,6 +533,11 @@ virtio_crypto_sym_input_data_helper(VirtIODevice *vdev,
             virtio_error(vdev, "virtio-crypto digest result incorrect");
         }
     }
+
+    req->in_len = sizeof(struct virtio_crypto_inhdr) + sym_op_info->src_len;
+    if (sym_op_info->op_type == VIRTIO_CRYPTO_SYM_OP_ALGORITHM_CHAINING) {
+        req->in_len += sym_op_info->digest_result_len;
+    }
 }
 
 static void
