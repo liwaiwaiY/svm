@@ -56,7 +56,6 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
 {
-    printf("[virtio_blk_req_complete] is called\n");
     fflush(stdout);
 
     VirtIOBlock *s = req->dev;
@@ -67,7 +66,6 @@ void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
     stb_p(&req->in->status, status);
     iov_discard_undo(&req->inhdr_undo);
     iov_discard_undo(&req->outhdr_undo);
-    printf("[virtio_blk_req_complete] call push\n");
     fflush(stdout);
     virtqueue_push(req->vq, &req->elem, req->in_len);
     virtio_notify(vdev, req->vq);
@@ -825,7 +823,6 @@ out:
 
 static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
 {
-    printf("[virtio_blk_handle_request] is called \n");
     fflush(stdout);
     uint32_t type;
     struct iovec *in_iov = req->elem.in_sg;
@@ -1045,9 +1042,7 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
         virtio_blk_submit_multireq(s, &mrb);
     }
 
-    printf("[virtio_blk_handle_vq] call defer calls\n");
     defer_call_end();
-    printf("[virtio_blk_handle_vq] done with defer fall\n");
 }
 
 static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)

@@ -155,6 +155,13 @@ GHashTable *gsi_ctxes = NULL;
 */
 GHashTable *set_aio = NULL;
 
+/*
+*  format: <K:DEVICE(vdev)->id, GINT_TO_POINTER(0)>
+*  local_qemu: remote devices list
+*  remote_stub: remote devices list
+*/
+GHashTable* ids = NULL;
+
 static struct io_uring send_uring_data;
 static struct io_uring *send_uring = &send_uring_data;
 
@@ -178,8 +185,13 @@ typedef struct CommCTX {
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
-    return !gsi_stubs || !DEVICE(vdev)->id || 
-           g_hash_table_contains(gsi_stubs, DEVICE(vdev)->id);
+    if (!gsi_stubs) // none remote devices
+        return false;
+
+    if (!DEVICE(vdev)->id) // no id
+        return false;
+
+    return g_hash_table_contains(ids, DEVICE(vdev)->id);
 }
 
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
@@ -246,7 +258,6 @@ int remote_uring_init(bool remote_stub)
 
 
 static int seq = 0;
-static GHashTable* ids = NULL;
 
 void remote_register_id(Object *obj, const char *id, Error **errp)
 {

@@ -4277,6 +4277,8 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
     if (unlikely(check_virtio_device_remote(vdev))) {
         return remote_virtio_device_start_ioeventfd_impl(vdev);
     }
+    printf("[start_ioeventfd_imp] normal \n");
+    fflush(stdout);
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
