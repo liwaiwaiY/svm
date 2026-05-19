@@ -4274,7 +4274,7 @@ static const Property virtio_properties[] = {
 
 static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
-    if (check_virtio_device_remote(vdev)) {
+    if (unlikely(check_virtio_device_remote(vdev))) {
         return remote_virtio_device_start_ioeventfd_impl(vdev);
     }
 

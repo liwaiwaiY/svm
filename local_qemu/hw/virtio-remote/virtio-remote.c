@@ -165,6 +165,7 @@ static struct io_uring *resp_uring = &resp_uring_data;
 *  decoupling I/O with strong ordering
 */
 typedef struct CommCTX {
+    bool used;
     bool sending;
     bool recving;
     int sent;
@@ -177,9 +178,8 @@ typedef struct CommCTX {
 
 bool check_virtio_device_remote(VirtIODevice *vdev)
 {
-    if (!gsi_stubs)
-        return false;
-    return g_hash_table_contains(gsi_stubs, DEVICE(vdev)->id);
+    return !gsi_stubs || !DEVICE(vdev)->id || 
+           g_hash_table_contains(gsi_stubs, DEVICE(vdev)->id);
 }
 
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
@@ -996,6 +996,10 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
+
+        if (qatomic_cmpxchg(&comm_ctx->used, false, true))
+            return;
+
         comm_ctx->ring = g_new0(VirtQueueElement *, RING_SIZE);
         // reset
         comm_ctx->sending = comm_ctx->recving = true;
@@ -1057,7 +1061,6 @@ void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 
 void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 {
-    force_printf("poll_ready\n");
     VirtQueue *vq = host_notifier_to_vq(n);
 
     remote_virtio_queue_notify_vq(vq);
