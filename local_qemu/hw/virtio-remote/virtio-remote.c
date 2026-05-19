@@ -261,6 +261,7 @@ static int seq = 0;
 
 void remote_register_id(Object *obj, const char *id, Error **errp)
 {
+    force_printf("[remote_register_id] regiserint id");
     if (!ids)
         ids = g_hash_table_new(g_str_hash, g_str_equal);
     if (g_hash_table_lookup(ids, id)) { // duplicate
@@ -268,8 +269,10 @@ void remote_register_id(Object *obj, const char *id, Error **errp)
         return;
     } else if (id) {
         DEVICE(obj)->id = g_strdup(id);
+        force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
     } else { // allocate one
         DEVICE(obj)->id = g_strdup_printf("remote%d", seq++);
+        force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
     }
     g_hash_table_insert(ids, DEVICE(obj)->id, GINT_TO_POINTER(0));
 }
@@ -281,19 +284,15 @@ static int reconnect_tcp_socket(int fd)
     return 0;
 }
 
-// enalbe socket aliveness in kernel
+// enalbe socket aliveness in kernel. 55s maximum link down
 static int enable_tcp_keepalive(int fd)
 {
-    // need kernel to keep socket alive (this will not effect cqe&sqe)
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
-    // set idle limit (seconds)
     int keep_idle = 30;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
-    // set options for heartbeat packet (seconds)
     int keep_intvl = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof(keep_intvl));
-    // set options for retring (seconds)
     int keep_cnt = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof(keep_cnt));
     return 0;
@@ -365,8 +364,10 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
     force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
-    if (len == 0)
+    if (len == 0) {
+        force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
         return;
+    }
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     struct io_uring_sqe *sqe;
@@ -579,6 +580,10 @@ static void remote_stub_read_handler(void *opaque)
     force_printf("[remote_stub_read_handler] found vq");
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    if (!ctx) {
+        force_printf("[remote_stub_read_handler] unexpected empty remote_ctx");
+        exit(0);
+    }
     if (!ctx->resp_fd) { // first called
         ctx->resp_fd = fd;
         ctx->vq_nr = vq_nr;
@@ -591,6 +596,7 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_buf = out_buf;
     ctx->in_buf = g_new0(uint8_t, in_len);
     if (in_len > 0 && !ctx->in_buf) {
+        force_printf("[remote_stub_read_handler] unexpected allocation error");
         g_free(out_buf);
         return;
     }
@@ -603,7 +609,7 @@ static void remote_stub_read_handler(void *opaque)
                  vq_nr, index, out_len, in_len);
 
     /*
-    *  basic handle_output framework: (aio is the same)
+    *  basic handle_output framework:
     *  while (elem = virtqueue_pop(vq, sizeof(VirtQueueElement))) {
     *      read(elem->out_sg);
     *      ....
@@ -620,6 +626,12 @@ static void remote_stub_read_handler(void *opaque)
     *                                           -> remain elem and free in push
     */
 
+    /*
+    *  asynchronous IO framework:
+    *  handle_ouput: defer_call(...) -> return
+    *  backend: call push later
+    */
+
     force_printf("[remote_stub_read_handler] call handle_output at[%p]", virtqueue_get_handle_output(vq));
     virtqueue_call_handle_output(vq);
     force_printf("[remote_stub_read_handler] call bh to handle");
@@ -630,6 +642,7 @@ static void remote_stub_read_handler(void *opaque)
     // g_free(out_buf);
     // g_free(ctx->in_buf);
     // reset remote_ctx
+    ctx->elem = NULL;
     ctx->elem_index = 0;
     ctx->out_len = 0;
     ctx->in_len = 0;
@@ -723,6 +736,7 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
         }
         RemoteVQueueCtx *ctx = g_new0(RemoteVQueueCtx, 1);
         virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
+        force_printf("[init_remote_stub_socket] set remote ctx at [%p] for vq [%d]", ctx, n);
     }
 
     g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(listen_fd));
@@ -896,7 +910,8 @@ link_err:
     if (!reconnect_tcp_socket(stub)) {
         if (buf)
             g_free(buf);
-        return NULL;
+        force_printf("[resp_listener] reconnection error");
+        exit(0);
     }
     switch (phase) {
     case 0:
@@ -1008,8 +1023,10 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
 
-        if (qatomic_cmpxchg(&comm_ctx->used, false, true))
+        if (qatomic_cmpxchg(&comm_ctx->used, false, true)) {
+            force_printf("[remote_virtio_qeueue_notify_vq] comm_ctx is using");
             return;
+        }
 
         comm_ctx->ring = g_new0(VirtQueueElement *, RING_SIZE);
         // reset
@@ -1051,6 +1068,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         sem_destroy(&comm_ctx->sem2);
         g_free(comm_ctx->ring);
         comm_ctx->ring = NULL;
+        qatomic_set(&comm_ctx->used, false);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);

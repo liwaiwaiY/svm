@@ -56,8 +56,6 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
 
 void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
 {
-    fflush(stdout);
-
     VirtIOBlock *s = req->dev;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
 
@@ -66,7 +64,6 @@ void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
     stb_p(&req->in->status, status);
     iov_discard_undo(&req->inhdr_undo);
     iov_discard_undo(&req->outhdr_undo);
-    fflush(stdout);
     virtqueue_push(req->vq, &req->elem, req->in_len);
     virtio_notify(vdev, req->vq);
 }
@@ -823,7 +820,6 @@ out:
 
 static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
 {
-    fflush(stdout);
     uint32_t type;
     struct iovec *in_iov = req->elem.in_sg;
     struct iovec *out_iov = req->elem.out_sg;
@@ -1815,6 +1811,8 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
 
     for (i = 0; i < conf->num_queues; i++) {
         virtio_add_queue(vdev, conf->queue_size, virtio_blk_handle_output);
+        printf("blk add queue with [%d]\n", i);
+        fflush(stdout);
     }
     qemu_coroutine_inc_pool_size(conf->num_queues * conf->queue_size / 2);
 
