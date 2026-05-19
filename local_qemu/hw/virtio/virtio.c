@@ -4400,7 +4400,7 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
     virtio_bus_release_ioeventfd(vbus);
 }
 
-// cmsvm
+// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
 static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
 {
     // cmsvm: these pointers are share among the same virtio devices
@@ -4412,17 +4412,24 @@ static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, E
     init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 
-// cmsvm
+// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
 static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error **errp)
 {
     remote_uring_init(true);
     init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 
-static void virtio_device_set_remote_id(Object *obj, const char *id, Error *errp)
+// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
+static void virtio_device_set_remote_id(Object *obj, const char *id, Error **errp)
 {
+    printf("[test obj 1] at %p\n", obj);
+    printf("[test obj 2] at %p\n", &VIRTIO_DEVICE(obj)->parent_obj.parent_obj);
+    // // printf("[test id] id is [%p]\n", VIRTIO_PCI(obj));
+    fflush(stdout);
+    exit(0);
     DeviceState *dev = DEVICE(obj);
     dev->id = g_strdup(id);
+    printf("[virtio_set_remote_id] we set id [%s] for vdev [%s]\n", dev->id, VIRTIO_DEVICE(obj)->name);
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
@@ -4442,6 +4449,8 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
                                   NULL, virtio_device_set_remote_machine);
     object_class_property_add_str(klass, "remote-stub",
                                   NULL, virtio_device_set_remote_stub);
+    object_class_property_add_str(klass, "remote-id",
+                                  NULL, virtio_device_set_remote_id);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }

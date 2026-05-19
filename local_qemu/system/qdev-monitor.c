@@ -646,7 +646,7 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 {
     ERRP_GUARD();
     DeviceClass *dc;
-    const char *driver, *path, *remote;
+    const char *driver, *path, *remote, *remote_id;
     int stub = 0;
     char *id;
     DeviceState *dev;
@@ -723,12 +723,14 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         remote = qdict_get_try_str(opts, "remote-stub");
         stub = 1;
     }
+    remote_id = qdict_get_try_str(opts, "remote-id");
     properties = qdict_clone_shallow(opts);
     qdict_del(properties, "driver");
     qdict_del(properties, "bus");
     qdict_del(properties, "id");
     qdict_del(properties, "remote-machine");
     qdict_del(properties, "remote-stub");
+    qdict_del(properties, "remote-id");
     // cmsvm: we add remote-machine(loca_qemu), remote-stub
     // remote-machine=127.0.0.1@8080, remote-stub=8080
     // but we need to delay to set after vq is allocated
@@ -743,9 +745,18 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
         goto err_del_dev;
     }
 
+    // cmsvm
     if (remote && stub == 0) {
+        printf("[qmonitor test] obj at %p\n", &dev->parent_obj);
+        printf("[qmonitor test] dev=%p dev->id=%s dev_type%s\n", dev, dev->id, object_get_typename(OBJECT(dev)));
+        fflush(stdout);
+        object_property_set_str(&dev->parent_obj, "remote-id", remote_id, errp);
         object_property_set_str(&dev->parent_obj, "remote-machine", remote, errp);
     } else if (remote && stub == 1) {
+        printf("[qmonitor test] obj at %p\n", &dev->parent_obj);
+        printf("[qmonitor test] dev=%p dev->id=%s dev_type%s\n", dev, dev->id, object_get_typename(OBJECT(dev)));
+        fflush(stdout);
+        object_property_set_str(&dev->parent_obj, "remote-id", remote_id, errp);
         object_property_set_str(&dev->parent_obj, "remote-stub", remote, errp);
     }
     if (*errp) {
