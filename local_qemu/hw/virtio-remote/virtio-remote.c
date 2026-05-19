@@ -230,7 +230,13 @@ int remote_uring_init(bool remote_stub)
         log_init_remote();
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
         if (ret < 0) {
-            fprintf(stderr, "io_uring init failed\n");
+            fprintf(stderr, "send_uring init failed\n");
+            return -1;
+        }
+        ret = io_uring_queue_init(IO_URING_DEPTH, resp_uring, 0);
+        if (ret < 0) {
+            fprintf(stderr, "resp_uring init failed\n");
+            io_uring_queue_exit(send_uring);
             return -1;
         }
     }
@@ -391,12 +397,6 @@ bool remote_virtio_notify_skip(VirtIODevice *vdev)
 
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
 {
-    if (!DEVICE(vdev)->id) {
-        force_printf("[init_remote_virtio_device_sockets] create id\n");
-        DEVICE(vdev)->id = g_new0(char, strlen(vdev->name));
-        memcpy(DEVICE(vdev)->id, vdev->name, strlen(vdev->name));
-    }
-
     force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", DEVICE(vdev)->id, ip_port);
 
     // get ip and port
@@ -474,23 +474,23 @@ static void remote_stub_read_handler(void *opaque)
     uint8_t *out_buf;
     int read_cnt, vq_nr, index, out_len, in_len;
 
-    if (!send_uring) {
+    if (!resp_uring) {
         return;
     }
 
     read_cnt = 0;
     while (read_cnt < (int)sizeof(req_header)) {
-        sqe = io_uring_get_sqe(send_uring);
+        sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, req_header + read_cnt,
                            sizeof(req_header) - read_cnt, 0);
-        io_uring_submit(send_uring);
-        io_uring_wait_cqe(send_uring, &cqe);
+        io_uring_submit(resp_uring);
+        io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
-            io_uring_cqe_seen(send_uring, cqe);
+            io_uring_cqe_seen(resp_uring, cqe);
             goto link_err;
         }
         read_cnt += cqe->res;
-        io_uring_cqe_seen(send_uring, cqe);
+        io_uring_cqe_seen(resp_uring, cqe);
     }
 
     log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV_HDR",
@@ -515,20 +515,20 @@ static void remote_stub_read_handler(void *opaque)
 
     read_cnt = 0;
     while (read_cnt < out_len) {
-        sqe = io_uring_get_sqe(send_uring);
+        sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, out_buf + read_cnt,
                            out_len - read_cnt, 0);
-        io_uring_submit(send_uring);
-        io_uring_wait_cqe(send_uring, &cqe);
+        io_uring_submit(resp_uring);
+        io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
-            io_uring_cqe_seen(send_uring, cqe);
+            io_uring_cqe_seen(resp_uring, cqe);
             g_free(out_buf);
             goto link_err;
         }
         read_cnt += cqe->res;
         force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
                      cqe->res, read_cnt, out_len);
-        io_uring_cqe_seen(send_uring, cqe);
+        io_uring_cqe_seen(resp_uring, cqe);
     }
 
     log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
@@ -647,13 +647,6 @@ static void remote_stub_accept_handler(void *opaque)
 
 void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
 {
-    // TODO : add a new property to set id
-    if (!DEVICE(vdev)->id) {
-        force_printf("[init_remote_virtio_device_sockets] create id\n");
-        DEVICE(vdev)->id = g_new0(char, strlen(vdev->name));
-        memcpy(DEVICE(vdev)->id, vdev->name, strlen(vdev->name));
-    }
-
     force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
 
     int port = atoi(str_port);

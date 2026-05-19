@@ -4419,6 +4419,12 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
 }
 
+static void virtio_device_set_remote_id(Object *obj, const char *id, Error *errp)
+{
+    DeviceState *dev = DEVICE(obj);
+    dev->id = g_strdup(id);
+}
+
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
 {
     /* Set the default value here. */
