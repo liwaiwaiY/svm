@@ -59,6 +59,8 @@ bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
 void remote_virtio_register_aio(VirtIODevice *vdev);
 
 bool remote_virtio_queue_empty(void *opaque);
+
+void remote_register_id(Object *obj, const char *id, Error **errp);
 // vhost
 
 

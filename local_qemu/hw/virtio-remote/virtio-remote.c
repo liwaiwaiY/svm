@@ -226,6 +226,7 @@ int remote_uring_init(bool remote_stub)
             io_uring_queue_exit(send_uring);
             return -1;
         }
+        
     } else {
         log_init_remote();
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
@@ -241,6 +242,25 @@ int remote_uring_init(bool remote_stub)
         }
     }
     return 0;
+}
+
+
+static int seq = 0;
+static GHashTable* ids = NULL;
+
+void remote_register_id(Object *obj, const char *id, Error **errp)
+{
+    if (!ids)
+        ids = g_hash_table_new(g_str_hash, g_str_equal);
+    if (g_hash_table_lookup(ids, id)) { // duplicate
+        error_setg(errp, "Duplicate device ID '%s'", id);
+        return;
+    } else if (id) {
+        DEVICE(obj)->id = g_strdup(id);
+    } else { // allocate one
+        DEVICE(obj)->id = g_strdup_printf("remote%d", seq++);
+    }
+    g_hash_table_insert(ids, DEVICE(obj)->id, GINT_TO_POINTER(0));
 }
 
 // socket reconnect
@@ -441,6 +461,9 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     // long-term usage (kernel automatically send hearbeats)
     enable_tcp_keepalive(fd);
     g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
+    CommCTX *comm_ctx = g_new0(CommCTX, 1);
+    g_hash_table_insert(gsi_ctxes, (gpointer)DEVICE(vdev)->id, comm_ctx);
+
     return;
 
 err_connect:
@@ -1026,7 +1049,6 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 // so we can left meta data of vring in local machine, send elem to remote
 void remote_virtio_queue_host_notifier_read(EventNotifier *n)
 {
-    force_printf("notify rea\n");
     VirtQueue *vq = host_notifier_to_vq(n);
     if (event_notifier_test_and_clear(n)) {
         remote_virtio_queue_notify_vq(vq);
@@ -1044,10 +1066,6 @@ void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", DEVICE(vdev)->id);
-    if (!g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id)) {
-        CommCTX *comm_ctx = g_new0(CommCTX, 1);
-        g_hash_table_insert(gsi_ctxes, (gpointer)DEVICE(vdev)->id, comm_ctx);
-    }
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;

@@ -747,16 +747,16 @@ DeviceState *qdev_device_add_from_qdict(const QDict *opts,
 
     // cmsvm
     if (remote && stub == 0) {
-        printf("[qmonitor test] obj at %p\n", &dev->parent_obj);
-        printf("[qmonitor test] dev=%p dev->id=%s dev_type%s\n", dev, dev->id, object_get_typename(OBJECT(dev)));
-        fflush(stdout);
         object_property_set_str(&dev->parent_obj, "remote-id", remote_id, errp);
+        if (*errp) {
+            goto err_del_dev;
+        }
         object_property_set_str(&dev->parent_obj, "remote-machine", remote, errp);
     } else if (remote && stub == 1) {
-        printf("[qmonitor test] obj at %p\n", &dev->parent_obj);
-        printf("[qmonitor test] dev=%p dev->id=%s dev_type%s\n", dev, dev->id, object_get_typename(OBJECT(dev)));
-        fflush(stdout);
         object_property_set_str(&dev->parent_obj, "remote-id", remote_id, errp);
+        if (*errp) {
+            goto err_del_dev;
+        }
         object_property_set_str(&dev->parent_obj, "remote-stub", remote, errp);
     }
     if (*errp) {
