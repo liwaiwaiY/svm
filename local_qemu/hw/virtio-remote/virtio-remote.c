@@ -849,9 +849,12 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        // force_printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]", vq_nr, index, len);
-        if (elem->index != index)
-            goto index_err;
+        // printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]\n", vq_nr, index, len);
+        // fflush(stdout);
+        if (elem->index != index) {
+            printf("[resp listeners] index [%d] not equal to elem index [%d]\n", index, elem->index);
+            fflush(stdout);
+        }
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
@@ -928,9 +931,6 @@ link_err:
 elem_err:
     g_free(buf);
     return NULL;
-index_err:
-    g_free(buf);
-    exit(1);
 }
 
 typedef struct SenderParam {
