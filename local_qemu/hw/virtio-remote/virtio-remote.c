@@ -58,80 +58,80 @@
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 #define RING_SIZE IO_URING_DEPTH
 
-__attribute__((format(printf, 1, 2)))
-void force_printf(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    printf("\n");
-    va_end(ap);
-    fflush(stdout);
-}
+// __attribute__((format(printf, 1, 2)))
+// void force_printf(const char *fmt, ...)
+// {
+//     va_list ap;
+//     va_start(ap, fmt);
+//     vprintf(fmt, ap);
+//     printf("\n");
+//     va_end(ap);
+//     fflush(stdout);
+// }
 
-static void ensure_log_dir(const char *dir)
-{
-    g_mkdir_with_parents(dir, 0755);
-}
+// static void ensure_log_dir(const char *dir)
+// {
+//     g_mkdir_with_parents(dir, 0755);
+// }
 
-static void log_hex_dump(const char *filepath, const char *prefix,
-                         int seq, const uint8_t *data, int len)
-{
-    FILE *f = fopen(filepath, "a");
-    if (!f) return;
+// static void log_hex_dump(const char *filepath, const char *prefix,
+//                          int seq, const uint8_t *data, int len)
+// {
+//     FILE *f = fopen(filepath, "a");
+//     if (!f) return;
 
-    fprintf(f, "[%s #%d] len=%d:\n", prefix, seq, len);
-    for (int off = 0; off < len; off += 32) {
-        int n = len - off < 32 ? len - off : 32;
-        for (int i = 0; i < n; i++)
-            fprintf(f, "%02x ", data[off + i]);
-        fprintf(f, "\n");
-    }
-    fflush(f);
-    fclose(f);
-}
+//     fprintf(f, "[%s #%d] len=%d:\n", prefix, seq, len);
+//     for (int off = 0; off < len; off += 32) {
+//         int n = len - off < 32 ? len - off : 32;
+//         for (int i = 0; i < n; i++)
+//             fprintf(f, "%02x ", data[off + i]);
+//         fprintf(f, "\n");
+//     }
+//     fflush(f);
+//     fclose(f);
+// }
 
-static void log_hex_dump_iov(const char *filepath, const char *prefix,
-                             int seq, struct iovec *iov, int iov_cnt)
-{
-    FILE *f = fopen(filepath, "a");
-    int total = 0, i = 0, off = 0;
-    if (!f) return;
+// static void log_hex_dump_iov(const char *filepath, const char *prefix,
+//                              int seq, struct iovec *iov, int iov_cnt)
+// {
+//     FILE *f = fopen(filepath, "a");
+//     int total = 0, i = 0, off = 0;
+//     if (!f) return;
 
-    for (int k = 0; k < iov_cnt; k++)
-        total += iov[k].iov_len;
+//     for (int k = 0; k < iov_cnt; k++)
+//         total += iov[k].iov_len;
 
-    fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
-    while (i < iov_cnt) {
-        for (int col = 0; col < 32 && i < iov_cnt; col++) {
-            uint8_t *p = (uint8_t *)iov[i].iov_base;
-            fprintf(f, "%02x ", p[off]);
-            off++;
-            if (off >= (int)iov[i].iov_len) { i++; off = 0; }
-        }
-        fprintf(f, "\n");
-    }
-    fflush(f);
-    fclose(f);
-}
+//     fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
+//     while (i < iov_cnt) {
+//         for (int col = 0; col < 32 && i < iov_cnt; col++) {
+//             uint8_t *p = (uint8_t *)iov[i].iov_base;
+//             fprintf(f, "%02x ", p[off]);
+//             off++;
+//             if (off >= (int)iov[i].iov_len) { i++; off = 0; }
+//         }
+//         fprintf(f, "\n");
+//     }
+//     fflush(f);
+//     fclose(f);
+// }
 
-static atomic_int local_send_seq;
-static atomic_int local_recv_seq;
-static atomic_int remote_recv_seq;
-static atomic_int remote_send_seq;
+// static atomic_int local_send_seq;
+// static atomic_int local_recv_seq;
+// static atomic_int remote_recv_seq;
+// static atomic_int remote_send_seq;
 
 #define LOCAL_LOG_DIR  "/home/waiai/SvmExp/local/svm/log"
 #define REMOTE_LOG_DIR "/home/waiai/SvmExp/remote/log"
 
-static void log_init_local(void)
-{
-    ensure_log_dir(LOCAL_LOG_DIR);
-}
+// static void log_init_local(void)
+// {
+//     ensure_log_dir(LOCAL_LOG_DIR);
+// }
 
-static void log_init_remote(void)
-{
-    ensure_log_dir(REMOTE_LOG_DIR);
-}
+// static void log_init_remote(void)
+// {
+//     ensure_log_dir(REMOTE_LOG_DIR);
+// }
 
 /*
 *  format: <K:DEVICE(vdev)->id, V:int>
@@ -220,12 +220,12 @@ int remote_uring_init(bool remote_stub)
 {
     if (gsi_stubs)
         return 0;
-    force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
+    // force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
 
     gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
 
     if (!remote_stub) { // local_qemu
-        log_init_local();
+        // log_init_local();
         gsi_ctxes = g_hash_table_new(g_str_hash, g_str_equal);
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
         if (ret < 0) {
@@ -240,7 +240,7 @@ int remote_uring_init(bool remote_stub)
         }
         
     } else {
-        log_init_remote();
+        // log_init_remote();
         int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
         if (ret < 0) {
             fprintf(stderr, "send_uring init failed\n");
@@ -261,7 +261,7 @@ static int seq = 0;
 
 void remote_register_id(Object *obj, const char *id, Error **errp)
 {
-    force_printf("[remote_register_id] regiserint id");
+    // force_printf("[remote_register_id] regiserint id");
     if (!ids)
         ids = g_hash_table_new(g_str_hash, g_str_equal);
     if (g_hash_table_lookup(ids, id)) { // duplicate
@@ -269,10 +269,10 @@ void remote_register_id(Object *obj, const char *id, Error **errp)
         return;
     } else if (id) {
         DEVICE(obj)->id = g_strdup(id);
-        force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
+        // force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
     } else { // allocate one
         DEVICE(obj)->id = g_strdup_printf("remote%d", seq++);
-        force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
+        // force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
     }
     g_hash_table_insert(ids, DEVICE(obj)->id, GINT_TO_POINTER(0));
 }
@@ -331,7 +331,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     if (ctx->elem) { // poped once
-        force_printf("[remote_stub_virtqueue_pop] empty as poped once from ctx");
+        // force_printf("[remote_stub_virtqueue_pop] empty as poped once from ctx");
         return NULL;
     }
 
@@ -363,9 +363,9 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 */
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
-    force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
+    // force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
     if (len == 0) {
-        force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
+        // force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
         return;
     }
 
@@ -386,15 +386,15 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         .msg_iov = resp_iov,
         .msg_iovlen = 2,
     };
-    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]",
-                 resp_header[0], resp_header[1], resp_header[2]);
+    // force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, index:%d, len: %d]",
+    //              resp_header[0], resp_header[1], resp_header[2]);
 
-    log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
-                     atomic_fetch_add(&remote_send_seq, 1) + 1,
-                     resp_iov, 1);
-    log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND",
-                     atomic_fetch_add(&remote_send_seq, 1) + 1,
-                     resp_iov + 1, 1);
+    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
+    //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
+    //                  resp_iov, 1);
+    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND",
+    //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
+    //                  resp_iov + 1, 1);
 
     sqe = io_uring_get_sqe(send_uring);
     io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
@@ -429,7 +429,7 @@ bool remote_virtio_notify_skip(VirtIODevice *vdev)
 
 void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
 {
-    force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", DEVICE(vdev)->id, ip_port);
+    // force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", DEVICE(vdev)->id, ip_port);
 
     // get ip and port
     char ip[64];
@@ -479,7 +479,7 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     return;
 
 err_connect:
-    force_printf("failed to connect to %s:%d", ip, port);
+    // force_printf("failed to connect to %s:%d", ip, port);
 err_sock2:
     close(fd);
 err_option:
@@ -496,7 +496,7 @@ err_sock:
 static void remote_stub_read_handler(void *opaque)
 {
     VirtIODevice *vdev = opaque;
-    force_printf("[remote_stub_read_handler] for vdev %s", DEVICE(vdev)->id);
+    // force_printf("[remote_stub_read_handler] for vdev %s", DEVICE(vdev)->id);
 
     int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
     if (fd < 0) {
@@ -528,9 +528,9 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_cqe_seen(resp_uring, cqe);
     }
 
-    log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV_HDR",
-                 atomic_fetch_add(&remote_recv_seq, 1) + 1,
-                 req_header, sizeof(req_header));
+    // log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV_HDR",
+    //              atomic_fetch_add(&remote_recv_seq, 1) + 1,
+    //              req_header, sizeof(req_header));
 
     vq_nr  = req_header[0] | (req_header[1] << 8) |
              (req_header[2] << 16) | (req_header[3] << 24);
@@ -540,8 +540,8 @@ static void remote_stub_read_handler(void *opaque)
               (req_header[10] << 16) | (req_header[11] << 24);
     in_len  = req_header[12] | (req_header[13] << 8) |
               (req_header[14] << 16) | (req_header[15] << 24);
-    force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
-                 vq_nr, index, out_len, in_len);
+    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
+    //              vq_nr, index, out_len, in_len);
 
     out_buf = g_new0(uint8_t, out_len);
     if (!out_buf) {
@@ -561,27 +561,27 @@ static void remote_stub_read_handler(void *opaque)
             goto link_err;
         }
         read_cnt += cqe->res;
-        force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
-                     cqe->res, read_cnt, out_len);
+        // force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
+        //              cqe->res, read_cnt, out_len);
         io_uring_cqe_seen(resp_uring, cqe);
     }
 
-    log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
-                 atomic_fetch_add(&remote_recv_seq, 1) + 1,
-                 out_buf, out_len);
+    // log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
+    //              atomic_fetch_add(&remote_recv_seq, 1) + 1,
+    //              out_buf, out_len);
 
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
     if (!vq) {
-        force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
-                     vq_nr, DEVICE(vdev)->id);
+        // force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
+        //              vq_nr, DEVICE(vdev)->id);
         g_free(out_buf);
         return;
     }
-    force_printf("[remote_stub_read_handler] found vq");
+    // force_printf("[remote_stub_read_handler] found vq");
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     if (!ctx) {
-        force_printf("[remote_stub_read_handler] unexpected empty remote_ctx");
+        // force_printf("[remote_stub_read_handler] unexpected empty remote_ctx");
         exit(0);
     }
     if (!ctx->resp_fd) { // first called
@@ -596,7 +596,7 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_buf = out_buf;
     ctx->in_buf = g_new0(uint8_t, in_len);
     if (in_len > 0 && !ctx->in_buf) {
-        force_printf("[remote_stub_read_handler] unexpected allocation error");
+        // force_printf("[remote_stub_read_handler] unexpected allocation error");
         g_free(out_buf);
         return;
     }
@@ -605,8 +605,8 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_sg[0].iov_len = ctx->out_len;
     ctx->in_sg[0].iov_base = ctx->in_buf;
     ctx->in_sg[0].iov_len = ctx->in_len;
-    force_printf("[remote_stub_read_handler] wrapper ctx [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
-                 vq_nr, index, out_len, in_len);
+    // force_printf("[remote_stub_read_handler] wrapper ctx [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
+    //              vq_nr, index, out_len, in_len);
 
     /*
     *  basic handle_output framework:
@@ -632,9 +632,9 @@ static void remote_stub_read_handler(void *opaque)
     *  backend: call push later
     */
 
-    force_printf("[remote_stub_read_handler] call handle_output at[%p]", virtqueue_get_handle_output(vq));
+    // force_printf("[remote_stub_read_handler] call handle_output at[%p]", virtqueue_get_handle_output(vq));
     virtqueue_call_handle_output(vq);
-    force_printf("[remote_stub_read_handler] call bh to handle");
+    // force_printf("[remote_stub_read_handler] call bh to handle");
     aio_bh_poll(qemu_get_aio_context());
 
     // test to free in push
@@ -653,7 +653,7 @@ static void remote_stub_read_handler(void *opaque)
     ctx->in_sg[0].iov_base = NULL;
     ctx->in_sg[0].iov_len = 0;
 
-    force_printf("[remote_stub_read_handler] return");
+    // force_printf("[remote_stub_read_handler] return");
     return;
 
 link_err:
@@ -664,7 +664,7 @@ link_err:
 
 static void remote_stub_accept_handler(void *opaque)
 {
-    force_printf("[remote_stub_accept_handler] Begin to connect ...");
+    // force_printf("[remote_stub_accept_handler] Begin to connect ...");
 
     VirtIODevice *vdev = opaque;
     int listen_fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
@@ -689,12 +689,12 @@ static void remote_stub_accept_handler(void *opaque)
     g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
 
     qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
-    force_printf("connected for dev %s", DEVICE(vdev)->id);
+    // force_printf("connected for dev %s", DEVICE(vdev)->id);
 }
 
 void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
 {
-    force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
+    // force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
 
     int port = atoi(str_port);
 
@@ -736,7 +736,7 @@ void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **e
         }
         RemoteVQueueCtx *ctx = g_new0(RemoteVQueueCtx, 1);
         virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
-        force_printf("[init_remote_stub_socket] set remote ctx at [%p] for vq [%d]", ctx, n);
+        // force_printf("[init_remote_stub_socket] set remote ctx at [%p] for vq [%d]", ctx, n);
     }
 
     g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(listen_fd));
@@ -805,7 +805,7 @@ static void* resp_listener(void *opaque)
     VirtQueueElement *elem;
     char *buf = NULL;
 
-    force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
+    // force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
 
     while (true) {
 listen_begin:
@@ -822,7 +822,7 @@ listen_begin:
             goto done;
         }
 
-        force_printf("[resp_listener] recv a resp, begin to read header");
+        // force_printf("[resp_listener] recv a resp, begin to read header");
         read_cnt = 0;
 listen_header:
         phase = 1;
@@ -839,9 +839,9 @@ listen_header:
             read_cnt += cqe->res;
             io_uring_cqe_seen(resp_uring, cqe);
         }
-        log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV_HDR",
-                     atomic_fetch_add(&local_recv_seq, 1) + 1,
-                     resp_header, sizeof(resp_header));
+        // log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV_HDR",
+        //              atomic_fetch_add(&local_recv_seq, 1) + 1,
+        //              resp_header, sizeof(resp_header));
         vq_nr = resp_header[0] | (resp_header[1] << 8) |
                 (resp_header[2] << 16) | (resp_header[3] << 24);
         index = resp_header[4] | (resp_header[5] << 8) |
@@ -849,11 +849,13 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        force_printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]", vq_nr, index, len);
+        // force_printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]", vq_nr, index, len);
+        if (elem->index != index)
+            goto index_err;
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
-            force_printf("[resp_listener] vq [%d] cannot found.", vq_nr);
+            // force_printf("[resp_listener] vq [%d] cannot found.", vq_nr);
             goto elem_err;
         }
 
@@ -872,28 +874,28 @@ listen_data:
                 goto link_err;
             }
             read_cnt += cqe->res;
-            force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
+            // force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]", cqe->res, read_cnt, len);
             io_uring_cqe_seen(resp_uring, cqe);
         }
-        log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV",
-                     atomic_fetch_add(&local_recv_seq, 1) + 1,
-                     (uint8_t *)buf, len);
+        // log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV",
+        //              atomic_fetch_add(&local_recv_seq, 1) + 1,
+        //              (uint8_t *)buf, len);
         // iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
         // we copy ourselves
         int copied = 0;
         for (int i = 0; i < elem->in_num && copied < len; i++) {
             int delta = MIN(elem->in_sg[i].iov_len, len - copied);
             memcpy(elem->in_sg[i].iov_base, buf + copied, delta);
-            log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
-                             elem->in_sg + i, 1);
-            log_hex_dump(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
-                         (uint8_t *)(buf + copied), delta);
+            // log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
+            //                  elem->in_sg + i, 1);
+            // log_hex_dump(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
+            //              (uint8_t *)(buf + copied), delta);
             copied += delta;
         }
 
         elem->len = len;
         g_free(buf);
-        force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
+        // force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 
 done:
         virtqueue_push(vq, elem, elem->len);
@@ -901,7 +903,7 @@ done:
         sem_post(&comm_ctx->sem2);
     }
 
-    force_printf("[resp_listener] return");
+    // force_printf("[resp_listener] return");
     qatomic_set(&comm_ctx->recving, false);
     sem_post(&comm_ctx->sem2);
     return NULL;
@@ -910,7 +912,7 @@ link_err:
     if (!reconnect_tcp_socket(stub)) {
         if (buf)
             g_free(buf);
-        force_printf("[resp_listener] reconnection error");
+        // force_printf("[resp_listener] reconnection error");
         exit(0);
     }
     switch (phase) {
@@ -926,6 +928,9 @@ link_err:
 elem_err:
     g_free(buf);
     return NULL;
+index_err:
+    g_free(buf);
+    exit(1);
 }
 
 typedef struct SenderParam {
@@ -946,7 +951,7 @@ static void* route_to_remote(void *opaque)
     struct io_uring_cqe *cqe;
     int vq_nr = virtio_get_queue_index(vq);
 
-    force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
+    // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // send data as [vq_nr, index, out_len, in_len, out_data]
@@ -974,15 +979,15 @@ static void* route_to_remote(void *opaque)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(send_uring);
 
-        force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] wiht [out_num:%d in_num:%d]",
-                     header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
+        // force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] wiht [out_num:%d in_num:%d]",
+        //              header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
 
-        log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
-                         atomic_fetch_add(&local_send_seq, 1) + 1,
-                         msg_sg, 1);
-        log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
-                         atomic_fetch_add(&local_send_seq, 1) + 1,
-                         msg_sg + 1, elem->out_num);
+        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
+        //                  atomic_fetch_add(&local_send_seq, 1) + 1,
+        //                  msg_sg, 1);
+        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
+        //                  atomic_fetch_add(&local_send_seq, 1) + 1,
+        //                  msg_sg + 1, elem->out_num);
 
         io_uring_wait_cqe(send_uring, &cqe);
         io_uring_cqe_seen(send_uring, cqe);
@@ -994,7 +999,7 @@ static void* route_to_remote(void *opaque)
 
         g_free(msg_sg);
 
-        force_printf("[route_to_remote] sent success");
+        // force_printf("[route_to_remote] sent success");
 
         // neglect full first
         comm_ctx->ring[comm_ctx->sent % RING_SIZE] = elem;
@@ -1010,8 +1015,8 @@ static void* route_to_remote(void *opaque)
 
 static void remote_virtio_queue_notify_vq(VirtQueue *vq)
 {
-    force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
-                 virtio_get_queue_index(vq), virtqueue_get_vdev_id(vq));
+    // force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
+    //              virtio_get_queue_index(vq), virtqueue_get_vdev_id(vq));
     if (virtqueue_get_vring_desc(vq)) {
         VirtIODevice *vdev = virtqueue_get_vdev(vq);
         int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
@@ -1024,7 +1029,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
         CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
 
         if (qatomic_cmpxchg(&comm_ctx->used, false, true)) {
-            force_printf("[remote_virtio_qeueue_notify_vq] comm_ctx is using");
+            // force_printf("[remote_virtio_qeueue_notify_vq] comm_ctx is using");
             return;
         }
 
@@ -1074,7 +1079,7 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
             virtio_set_started(vdev, true);
         }
     }
-    force_printf("[remote_virtio_queue_notify_vq] return");
+    // force_printf("[remote_virtio_queue_notify_vq] return");
 }
 
 // this function is called by the ioeventfd notify
@@ -1097,7 +1102,7 @@ void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
 
 int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
-    force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", DEVICE(vdev)->id);
+    // force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", DEVICE(vdev)->id);
 
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
