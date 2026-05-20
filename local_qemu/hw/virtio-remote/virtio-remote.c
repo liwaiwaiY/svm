@@ -56,7 +56,7 @@
 */
 
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
-#define RING_SIZE IO_URING_DEPTH
+#define RING_SIZE IO_URING_DEPTH * 4
 
 // __attribute__((format(printf, 1, 2)))
 // void force_printf(const char *fmt, ...)
@@ -800,7 +800,7 @@ static void* resp_listener(void *opaque)
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     uint8_t resp_header[3 * sizeof(int)];
-    int vq_nr, index, len;
+    int vq_nr, index, len, tmp_recved;
     int read_cnt, phase; // WARN: phase is not reliable code
     VirtQueueElement *elem;
     char *buf = NULL;
@@ -816,9 +816,11 @@ listen_begin:
         if (!qatomic_read(&comm_ctx->sending) && (qatomic_read(&comm_ctx->recved) >= qatomic_read(&comm_ctx->sent)))
             break;
 
-        elem = comm_ctx->ring[comm_ctx->recved % RING_SIZE];
+        tmp_recved = qatomic_read(&comm_ctx->recved);
+        elem = comm_ctx->ring[tmp_recved % RING_SIZE];
         if (elem->in_num == 0) {
             elem->len = 0;
+            force_printf("[resp_listener] skip one elem at [%p]\n", elem);
             goto done;
         }
 
@@ -849,12 +851,9 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        // printf("[resp_listener] get header as [vq_nr: %d, index: %d, len: %d]\n", vq_nr, index, len);
-        // fflush(stdout);
-        if (elem->index != index) {
-            printf("[resp listeners] index [%d] not equal to elem index [%d]\n", index, elem->index);
-            fflush(stdout);
-        }
+        elem = comm_ctx->ring[index % RING_SIZE];
+        // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
+        //              index, elem);
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
@@ -900,6 +899,12 @@ listen_data:
         g_free(buf);
         // force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 
+        // switch offset [index] to recv
+        if (index != tmp_recved % RING_SIZE) {
+            VirtQueueElement *tmp = comm_ctx->ring[index];
+            comm_ctx->ring[index] = comm_ctx->ring[tmp_recved % RING_SIZE];
+            comm_ctx->ring[tmp_recved % RING_SIZE] = tmp;
+        }
 done:
         virtqueue_push(vq, elem, elem->len);
         qatomic_fetch_inc(&comm_ctx->recved);
@@ -929,7 +934,6 @@ link_err:
         return NULL;
     }
 elem_err:
-    g_free(buf);
     return NULL;
 }
 
@@ -958,7 +962,8 @@ static void* route_to_remote(void *opaque)
         struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
         int header[4];
         header[0] = vq_nr;
-        header[1] = elem->index;
+        // header[1] = elem->index;
+        header[1] = qatomic_read(comm_ctx->sent) % RING_SIZE;
         header[2] = 0;
         for (int i = 0; i < elem->out_num; i++) {
             header[2] += elem->out_sg[i].iov_len;
@@ -1002,7 +1007,7 @@ static void* route_to_remote(void *opaque)
         // force_printf("[route_to_remote] sent success");
 
         // neglect full first
-        comm_ctx->ring[comm_ctx->sent % RING_SIZE] = elem;
+        comm_ctx->ring[qatomic_read(comm_ctx->sent) % RING_SIZE] = elem;
         qatomic_fetch_inc(&comm_ctx->sent);
         sem_post(&comm_ctx->sem1);
     }
