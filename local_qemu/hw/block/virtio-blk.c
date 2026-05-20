@@ -1811,8 +1811,6 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
 
     for (i = 0; i < conf->num_queues; i++) {
         virtio_add_queue(vdev, conf->queue_size, virtio_blk_handle_output);
-        printf("blk add queue with [%d]\n", i);
-        fflush(stdout);
     }
     qemu_coroutine_inc_pool_size(conf->num_queues * conf->queue_size / 2);
 
