@@ -855,11 +855,12 @@ listen_header:
         force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
                      vq_nr, index, len);
         // switched
-        if (g_hash_table_contains(mapping, GINT_TO_POINTER(index))) {
+        while (g_hash_table_contains(mapping, GINT_TO_POINTER(index))) {
             index = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(index)));
             g_hash_table_remove(mapping, GINT_TO_POINTER(index));
-            force_printf("[resp_listener] switched to [index:%d]", index);
+            force_printf("[resp_listener] nested remapping to [index:%d]", index);
         }
+        force_printf("[resp_listener] done nested remapping at [index:%d]", index);
         elem = comm_ctx->ring[index % RING_SIZE];
         // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
         //              index, elem);
@@ -973,6 +974,9 @@ static void* route_to_remote(void *opaque)
     // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
+        // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
+        //     sem_wait(&comm_ctx->sem3);
+
         // send data as [vq_nr, index, out_len, in_len, out_data]
         struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
         int tmp_sent = qatomic_read(&comm_ctx->sent);
