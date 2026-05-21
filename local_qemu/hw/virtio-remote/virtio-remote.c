@@ -371,7 +371,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     int sgs = 0, cnt = 0;
 
     // [vq_nr, sent(elem->index), len] [data1] [data2] ... [data-len]
-    int resp_header[3];
+    int *resp_header = g_new0(int, 3);
 
     resp_header[0] = ctx->vq_nr;
     resp_header[1] = elem->index;
@@ -382,7 +382,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
 
     iovec *resp_iov = g_new0(iovec, sgs + 1);
     resp_iov[0].iov_base = resp_header;
-    resp_iov[0].iov_len = sizeof(resp_header);
+    resp_iov[0].iov_len = sizeof(int) * 3;
     memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
     resp_iov[sgs - 1].iov_len -= (cnt - len);
 
@@ -413,6 +413,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         io_uring_cqe_seen(send_uring, cqe);
     }
 
+    g_free(resp_header);
     g_free(resp_iov);
 free:
     for (int i = 0; i < elem->out_num&& !elem->out_sg[i].iov_base; i++) {
@@ -557,9 +558,9 @@ static void remote_stub_read_handler(void *opaque)
 
     out_sg = g_new0(iovec, out_num);
     in_sg = g_new0(iovec, in_num);
-    int tmp = 0;
-    read_cnt = 0;
-    while (read_cnt < sizeof(int) * out_num) {
+    uint8_t tmp[sizeof(int)];
+    
+    for (int i = 0; i < out_num; i++) {
         sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, &tmp, sizeof(int), MSG_WAITALL);
         io_uring_submit(resp_uring);
@@ -568,27 +569,23 @@ static void remote_stub_read_handler(void *opaque)
             io_uring_cqe_seen(resp_uring, cqe);
             goto data_err;
         }
-        out_sg[(read_cnt / sizeof(int))].iov_len = tmp;
-        out_sg[(read_cnt / sizeof(int))].iov_base = g_new0(char, tmp);
-        read_cnt += cqe->res;
-        tmp = 0;
-        io_uring_cqe_seen(resp_uring, cqe);
+        out_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
+        out_sg[i].iov_base = g_new(char, out_sg[i].iov_len);
+        force_printf("[???? out sg] id [%d] len [%ld]", i, out_sg[i].iov_len);
     }
-    read_cnt = 0;
-    while (read_cnt < sizeof(int) * in_num) {
+
+    for (int i = 0; i < in_num; i++) {
         sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
+        io_uring_prep_recv(sqe, fd, &tmp, sizeof(int), MSG_WAITALL);
         io_uring_submit(resp_uring);
         io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
             goto data_err;
         }
-        in_sg[(read_cnt / 4)].iov_len = tmp;
-        in_sg[(read_cnt / 4)].iov_base = g_new0(char, tmp);
-        read_cnt += cqe->res;
-        tmp = 0;
-        io_uring_cqe_seen(resp_uring, cqe);
+        in_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
+        in_sg[i].iov_base = g_new(char, in_sg[i].iov_len);
+        force_printf("[???? in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
     }
 
     for (int i = 0; i < out_num; i++) { // read out datas
@@ -997,10 +994,8 @@ static void* route_to_remote(void *opaque)
 
         // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
 
-        int header[4];
+        int *header = g_new0(int, 4);
         header[0] = vq_nr;
-        // header[1] = elem->index;
-        // header[1] = tmp_sent % RING_SIZE;
         header[1] = tmp_sent;
         header[2] = elem->out_num;
         header[3] = elem->in_num;
@@ -1010,7 +1005,7 @@ static void* route_to_remote(void *opaque)
         for (int i = 0; i < elem->in_num; i++)
             lens[i + elem->out_num] = elem->in_sg[i].iov_len;
         msg_sg[0].iov_base = header;
-        msg_sg[0].iov_len = sizeof(header);
+        msg_sg[0].iov_len = sizeof(int) * 4;
         msg_sg[1].iov_base = lens;
         msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
         memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
@@ -1025,6 +1020,10 @@ static void* route_to_remote(void *opaque)
 
         force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
                      header[0], header[1], header[2], header[3]);
+        for (int i = 0; i < header[2]; i++)
+            force_printf("[???? out_sg] len [%d] [%d]", i, lens[i]);
+        for (int i = 0; i < header[3]; i++)
+            force_printf("[?!!! in sg]  len [%d] [%d]", i + header[2], lens[i + header[2]]);
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
@@ -1042,6 +1041,7 @@ static void* route_to_remote(void *opaque)
         }
 
         g_free(lens);
+        g_free(header);
         g_free(msg_sg);
 
         // force_printf("[route_to_remote] sent success");
