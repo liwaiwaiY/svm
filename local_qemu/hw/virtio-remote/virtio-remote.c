@@ -336,8 +336,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
     }
 
     // int out_num = ctx->out_num, in_num = ctx->in_num;
-    int out_num = 1, in_num = 1; // todocmsvm v2: add sg_table
-    int i = 0;
+    int out_num = ctx->out_num, in_num = ctx->in_num;
     VirtQueueElement *ret = remote_stub_virtqueue_alloc_element(sz, out_num, in_num);
     ret->index = ctx->elem_index;
     ret->ndescs = 1;
@@ -345,11 +344,11 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
     ret->len = 0;
     // out_addr and in_addr fields are filled to prevent escape
     // need to handle in migration
-    for (i = 0; i < out_num; i++) {
+    for (int i = 0; i < out_num; i++) {
         ret->out_addr[i] = 0;
         ret->out_sg[i] = ctx->out_sg[i];
     }
-    for (i = 0; i < in_num; i++) {
+    for (int i = 0; i < in_num; i++) {
         ret->in_addr[i] = 0;
         ret->in_sg[i] = ctx->in_sg[i];
     }
@@ -358,9 +357,6 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
     return ret;
 }
 
-/*
-*  need to send resp back as [vq_nr, index, in_len, in_data]
-*/
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
     // force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
@@ -372,19 +368,27 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
+    int sgs = 0, cnt = 0;
+
+    // [vq_nr, sent(elem->index), len] [data1] [data2] ... [data-len]
     int resp_header[3];
 
     resp_header[0] = ctx->vq_nr;
     resp_header[1] = elem->index;
     resp_header[2] = len;
 
-    struct iovec resp_iov[2] = {
-        { .iov_base = resp_header,     .iov_len = sizeof(resp_header) },
-        { .iov_base = elem->in_sg[0].iov_base,      .iov_len = len },
-    };
+    while (cnt < len)
+        cnt += elem->in_sg[sgs++].iov_len;
+
+    struct iovec *resp_iov = g_new0(struct iovec, sgs + 1);
+    resp_iov[0].iov_base = resp_header;
+    resp_iov[0].iov_len = size(resp_header);
+    memcpy(resp_iov + 1, elem->in_sg, sizeof(struct iovec) * sgs);
+    resp_iov[sgs - 1].iov_len -= (cnt - len);
+
     struct msghdr msg = {
         .msg_iov = resp_iov,
-        .msg_iovlen = 2,
+        .msg_iovlen = sgs + 1,
     };
     // force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, offset:%d, len: %d]",
     //              resp_header[0], resp_header[1], resp_header[2]);
@@ -506,12 +510,14 @@ static void remote_stub_read_handler(void *opaque)
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     uint8_t req_header[4 * sizeof(int)];
-    uint8_t *out_buf;
-    int read_cnt, vq_nr, index, out_len, in_len;
+    struct iovec* out_sg, in_sg;
+    int read_cnt, vq_nr, sent, out_num, in_num;
 
     if (!resp_uring) {
         return;
     }
+
+    // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
 
     read_cnt = 0;
     while (read_cnt < (int)sizeof(req_header)) {
@@ -534,41 +540,59 @@ static void remote_stub_read_handler(void *opaque)
 
     vq_nr  = req_header[0] | (req_header[1] << 8) |
              (req_header[2] << 16) | (req_header[3] << 24);
-    index  = req_header[4] | (req_header[5] << 8) |
+    sent  = req_header[4] | (req_header[5] << 8) |
              (req_header[6] << 16) | (req_header[7] << 24);
-    out_len = req_header[8] | (req_header[9] << 8) |
+    out_num = req_header[8] | (req_header[9] << 8) |
               (req_header[10] << 16) | (req_header[11] << 24);
-    in_len  = req_header[12] | (req_header[13] << 8) |
+    in_num  = req_header[12] | (req_header[13] << 8) |
               (req_header[14] << 16) | (req_header[15] << 24);
-    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, offset:%d, out_len:%d, in_len:%d]",
-    //              vq_nr, index, out_len, in_len);
+    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+    //              vq_nr, sent, out_num, in_num);
 
-    out_buf = g_new0(uint8_t, out_len);
-    if (!out_buf) {
-        return;
-    }
-
+    out_sg = g_new0(struct iovec, out_num);
+    in_sg = g_new0(struct iovec, in_num);
+    int tmp = 0;
     read_cnt = 0;
-    while (read_cnt < out_len) {
+    while (read_cnt < sizeof(int) * out_num) {
         sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, out_buf + read_cnt,
-                           out_len - read_cnt, 0);
-        io_uring_submit(resp_uring);
-        io_uring_wait_cqe(resp_uring, &cqe);
+        io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
-            g_free(out_buf);
             goto link_err;
         }
+        out_sg[(read_cnt / 4)].iov_len = tmp;
+        out_sg[(read_cnt / 4)].iov_base = g_new0(char, tmp);
         read_cnt += cqe->res;
-        // force_printf("[remote_stub_read_handler] recv data at [cqe->res:%d, read_cnt:%d, need:%d]",
-        //              cqe->res, read_cnt, out_len);
+        tmp = 0;
+        io_uring_cqe_seen(resp_uring, cqe);
+    }
+    while (read_cnt < sizeof(int) * in_num) {
+        sqe = io_uring_get_sqe(resp_uring);
+        io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
+        if (cqe->res <= 0) {
+            io_uring_cqe_seen(resp_uring, cqe);
+            goto link_err;
+        }
+        in_sg[(read_cnt / 4)].iov_len = tmp;
+        in_sg[(read_cnt / 4)].iov_base = g_new0(char, tmp);
+        read_cnt += cqe->res;
+        tmp = 0;
         io_uring_cqe_seen(resp_uring, cqe);
     }
 
-    // log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
-    //              atomic_fetch_add(&remote_recv_seq, 1) + 1,
-    //              out_buf, out_len);
+    for (int i = 0; i < out_num; i++) { // read out datas
+        sqe = io_uring_get_sqe(resp_uring);
+        io_uring_prep_recv(sqe, fd, out_sg[i].iov_base,
+                           out_sg[i].iov_len, MSG_WAITALL);
+        if (cqe->res <= 0) {
+            io_uring_cqe_seen(cqe);
+            goto out_err;
+        }
+    }
+
+    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
+    //                  atomic_fetch_add(&remote_recv_seq, 1) + 1,
+    //                  out_sg, out_num);
 
     VirtQueue *vq = lookup_vq(vdev, vq_nr);
     if (!vq) {
@@ -590,23 +614,11 @@ static void remote_stub_read_handler(void *opaque)
     }
 
     // elem-specific
-    ctx->elem_index = index;
-    ctx->out_len = out_len;
-    ctx->in_len = in_len;
-    ctx->out_buf = out_buf;
-    ctx->in_buf = g_new0(uint8_t, in_len);
-    if (in_len > 0 && !ctx->in_buf) {
-        // force_printf("[remote_stub_read_handler] unexpected allocation error");
-        g_free(out_buf);
-        return;
-    }
-
-    ctx->out_sg[0].iov_base = ctx->out_buf;
-    ctx->out_sg[0].iov_len = ctx->out_len;
-    ctx->in_sg[0].iov_base = ctx->in_buf;
-    ctx->in_sg[0].iov_len = ctx->in_len;
-    // force_printf("[remote_stub_read_handler] wrapper ctx [vq_nr:%d, index:%d, out_len:%d, in_len:%d]",
-    //              vq_nr, index, out_len, in_len);
+    ctx->elem_index = sent;
+    ctx->out_num = out_num;
+    ctx->in_num = in_num;
+    ctx->out_sg = out_sg;
+    ctx->in_sg = in_sg;
 
     /*
     *  basic handle_output framework:
@@ -644,14 +656,10 @@ static void remote_stub_read_handler(void *opaque)
     // reset remote_ctx
     ctx->elem = NULL;
     ctx->elem_index = 0;
-    ctx->out_len = 0;
-    ctx->in_len = 0;
-    ctx->out_buf = NULL;
-    ctx->in_buf = NULL;
-    ctx->out_sg[0].iov_base = NULL;
-    ctx->out_sg[0].iov_len = 0;
-    ctx->in_sg[0].iov_base = NULL;
-    ctx->in_sg[0].iov_len = 0;
+    ctx->out_num = 0;
+    ctx->in_num = 0;
+    ctx->out_sg = NULL;
+    ctx->in_sg = NULL;
 
     // force_printf("[remote_stub_read_handler] return");
     return;
@@ -660,6 +668,14 @@ link_err:
     qemu_set_fd_handler(fd, NULL, NULL, NULL);
     close(fd);
     g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
+    exit(0);
+data_err:
+    for (int i = 0; i < out_num; i++)
+        g_free(out_sg[i].iov_base);
+    for (int i = 0; i < in_num; i++)
+        g_free(in_sg[i].iov_base);
+    g_free(out_sg);
+    g_free(in_sg);
     exit(0);
 }
 
@@ -801,7 +817,7 @@ static void* resp_listener(void *opaque)
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     uint8_t resp_header[3 * sizeof(int)];
-    int vq_nr, index, len, tmp_recved;
+    int vq_nr, sent, len, tmp_recved;
     int read_cnt, phase; // WARN: phase is not reliable code
     VirtQueueElement *elem;
     char *buf = NULL;
@@ -826,6 +842,7 @@ listen_begin:
             goto done;
         }
 
+        // [vq_nr, sent, len] [data1] [data2] ... [data-len]
         // force_printf("[resp_listener] recv a resp, begin to read header");
         read_cnt = 0;
 listen_header:
@@ -848,24 +865,24 @@ listen_header:
         //              resp_header, sizeof(resp_header));
         vq_nr = resp_header[0] | (resp_header[1] << 8) |
                 (resp_header[2] << 16) | (resp_header[3] << 24);
-        index = resp_header[4] | (resp_header[5] << 8) |
+        sent = resp_header[4] | (resp_header[5] << 8) |
                 (resp_header[6] << 16) | (resp_header[7] << 24);
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
         // force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
-        //              vq_nr, index, len);
+        //              vq_nr, sent, len);
         // switched
-        while (g_hash_table_contains(mapping, GINT_TO_POINTER(index))) {
-            int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(index)));
-            g_hash_table_remove(mapping, GINT_TO_POINTER(index));
-            // force_printf("[resp_listener] nested remapping: [index:%d] -> [tmp:%d]", index, tmp);
-            index = tmp;
+        while (g_hash_table_contains(mapping, GINT_TO_POINTER(sent))) {
+            int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(isent)));
+            g_hash_table_remove(mapping, GINT_TO_POINTER(sent));
+            // force_printf("[resp_listener] nested remapping: [sent:%d] -> [tmp:%d]", sent, tmp);
+            sent = tmp;
         }
-        // force_printf("[resp_listener] done nested remapping at [index:%d]", index);
-        elem = comm_ctx->ring[index % RING_SIZE];
+        // force_printf("[resp_listener] done nested remapping at [sent:%d]", sent);
+        elem = comm_ctx->ring[sent % RING_SIZE];
         // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
-        //              index, elem);
+        //              sent, elem);
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
@@ -873,57 +890,37 @@ listen_header:
             goto elem_err;
         }
 
-        buf = g_new0(char, len);
-        read_cnt = 0;
 listen_data:
-        phase = 2;
-        while (read_cnt < len) {
+        read_cnt = 0;
+        for (int i = 0; i < elem->in_num; i++) {
             sqe = io_uring_get_sqe(resp_uring);
-            io_uring_prep_recv(sqe, stub, buf + read_cnt, len - read_cnt, 0);
-            io_uring_submit(resp_uring);
+            io_uring_prep_recv(sqe, stub, elem->in_sg[i].iov_base,
+                               MIN(elem->in_sg[i].iov_len, len-read_cnt),
+                               MSG_WAITALL);
             io_uring_wait_cqe(resp_uring, &cqe);
             if (cqe->res <= 0) {
                 io_uring_cqe_seen(resp_uring, cqe);
-                g_free(buf);
                 goto link_err;
             }
-            read_cnt += cqe->res;
-            // force_printf("[resp_listener] recv data at [cqe->res: %d, read_cnt: %d, need: %d]",
-            //               cqe->res, read_cnt, len);
-            io_uring_cqe_seen(resp_uring, cqe);
         }
-        // log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV",
-        //              atomic_fetch_add(&local_recv_seq, 1) + 1,
-        //              (uint8_t *)buf, len);
-        // iov_from_buf(elem->in_sg, elem->in_num, 0, buf, len);
-        // we copy ourselves
-        int copied = 0;
-        for (int i = 0; i < elem->in_num && copied < len; i++) {
-            int delta = MIN(elem->in_sg[i].iov_len, len - copied);
-            memcpy(elem->in_sg[i].iov_base, buf + copied, delta);
-            // log_hex_dump_iov(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
-            //                  elem->in_sg + i, 1);
-            // log_hex_dump(LOCAL_LOG_DIR "/iov-from-buf.log", "RECV", 0,
-            //              (uint8_t *)(buf + copied), delta);
-            copied += delta;
-        }
+
+        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-recv.log", "RECV",
+        //                  atomic_fetch_add(&local_recv_seq, 1) + 1,
+        //                  elem->in_sg, elem->in_num);
 
         elem->len = len;
-        g_free(buf);
-        // force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
-
-        // switch offset [index] to recv
-        if (index != tmp_recved) { // sent != rcved
-            VirtQueueElement *tmp = comm_ctx->ring[index % RING_SIZE];
-            comm_ctx->ring[index % RING_SIZE] = comm_ctx->ring[tmp_recved % RING_SIZE];
+        // switch offset [sent] to recv
+        if (sent != tmp_recved) { // sent != rcved
+            VirtQueueElement *tmp = comm_ctx->ring[sent % RING_SIZE];
+            comm_ctx->ring[sent % RING_SIZE] = comm_ctx->ring[tmp_recved % RING_SIZE];
             comm_ctx->ring[tmp_recved % RING_SIZE] = tmp;
-            g_hash_table_insert(mapping, GINT_TO_POINTER(tmp_recved), GINT_TO_POINTER(index));
-            // force_printf("[resp_listener] elem is remmapped: tmp_recved[%d] ->  index[%d]",
-            //              tmp_recved, index);
+            g_hash_table_insert(mapping, GINT_TO_POINTER(tmp_recved), GINT_TO_POINTER(sent));
+            // force_printf("[resp_listener] elem is remmapped: tmp_recved[%d] ->  sent[%d]",
+            //              tmp_recved, sent);
         }
 
 done:
-        // force_printf("[resp_listener] push elem at [%p] with index [%d]", elem, elem->index);
+        // force_printf("[resp_listener] push elem at [%p] with sent [%d]", elem, elem->sent);
         virtqueue_push(vq, elem, elem->len);
         qatomic_fetch_inc(&comm_ctx->recved);
         sem_post(&comm_ctx->sem2);
@@ -981,28 +978,31 @@ static void* route_to_remote(void *opaque)
         //     sem_wait(&comm_ctx->sem3);
 
         // send data as [vq_nr, index, out_len, in_len, out_data]
-        struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 1);
+        struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 2);
         int tmp_sent = qatomic_read(&comm_ctx->sent);
         // directly write into ring
         comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
         qatomic_fetch_inc(&comm_ctx->sent);
+
+        // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
 
         int header[4];
         header[0] = vq_nr;
         // header[1] = elem->index;
         // header[1] = tmp_sent % RING_SIZE;
         header[1] = tmp_sent;
-        header[2] = 0;
-        for (int i = 0; i < elem->out_num; i++) {
-            header[2] += elem->out_sg[i].iov_len;
-        }
-        header[3] = 0;
-        for (int i = 0; i < elem->in_num; i++) {
-            header[3] += elem->in_sg[i].iov_len;
-        }
+        header[2] = elem->out_num;
+        header[3] = elem->in_num;
+        int *lens = g_new0(int, header[2] + header[3]);
+        for (int i = 0; i < elem->out_num; i++)
+            lens[i] = elem->out_sg[i].iov_len;
+        for (int i = 0; i < elem->in_num; i++)
+            lens[i + elem->out_num] = elem->in_sg[i].iov_len;
         msg_sg[0].iov_base = header;
         msg_sg[0].iov_len = sizeof(header);
-        memcpy(msg_sg + 1, elem->out_sg, elem->out_num * sizeof(struct iovec));
+        msg_sg[1].iov_base = lens;
+        msg_sg[1].iov_len = header[2] + header[3];
+        memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(struct iovec));
         struct msghdr msg = {
             .msg_iov = msg_sg,
             .msg_iovlen = elem->out_num + 1,

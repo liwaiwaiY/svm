@@ -21,12 +21,10 @@ typedef struct RemoteVQueueCtx {
     int resp_fd;
     int vq_nr;
     unsigned int elem_index;
-    unsigned int out_len;
-    unsigned int in_len;
-    uint8_t *out_buf;
-    uint8_t *in_buf;
-    struct iovec out_sg[1];
-    struct iovec in_sg[1];
+    unsigned int out_num;
+    unsigned int in_num;
+    struct iovec *out_sg;
+    struct iovec *in_sg;
     // VirtQueueElement elem;
     void *elem;
 } RemoteVQueueCtx;
