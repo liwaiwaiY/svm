@@ -852,7 +852,7 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        force_printf("[resp_listener] recv header [vq_nr:%d, index:%d, len:%d]",
+        force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
                      vq_nr, index, len);
         // switched
         if (g_hash_table_contains(mapping, GINT_TO_POINTER(index))) {
@@ -860,7 +860,7 @@ listen_header:
             g_hash_table_remove(mapping, GINT_TO_POINTER(index));
             force_printf("[resp_listener] switched to [index:%d]", index);
         }
-        elem = comm_ctx->ring[index];
+        elem = comm_ctx->ring[index % RING_SIZE];
         // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
         //              index, elem);
 
@@ -910,13 +910,13 @@ listen_data:
         // force_printf("[resp_listener] push elem [%d] to vq [%d] with len [%d]", index, vq_nr, len);
 
         // switch offset [index] to recv
-        if (index != (tmp_recved % RING_SIZE)) {
-            VirtQueueElement *tmp = comm_ctx->ring[index];
-            comm_ctx->ring[index] = comm_ctx->ring[tmp_recved % RING_SIZE];
+        if (index != tmp_recved) { // sent != rcved
+            VirtQueueElement *tmp = comm_ctx->ring[index % RING_SIZE];
+            comm_ctx->ring[index % RING_SIZE] = comm_ctx->ring[tmp_recved % RING_SIZE];
             comm_ctx->ring[tmp_recved % RING_SIZE] = tmp;
-            g_hash_table_insert(mapping, GINT_TO_POINTER(comm_ctx->ring[index]->index), GINT_TO_POINTER(index));
-            force_printf("[resp_listener] switch elem at [offset:%d] to [recved:%d]",
-                         index, tmp_recved % RING_SIZE);
+            g_hash_table_insert(mapping, GINT_TO_POINTER(tmp_recved), GINT_TO_POINTER(index));
+            force_printf("[resp_listener] elem with tmp_recved[%d] is remapped to index[%d]",
+                         tmp_recved, index);
         }
 
 done:
@@ -978,9 +978,9 @@ static void* route_to_remote(void *opaque)
         int tmp_sent = qatomic_read(&comm_ctx->sent);
         int header[4];
         header[0] = vq_nr;
-        header[1] = elem->index;
+        // header[1] = elem->index;
         // header[1] = tmp_sent % RING_SIZE;
-        // header[1] = tmp_sent;
+        header[1] = tmp_sent;
         header[2] = 0;
         for (int i = 0; i < elem->out_num; i++) {
             header[2] += elem->out_sg[i].iov_len;
