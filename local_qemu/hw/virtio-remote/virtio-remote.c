@@ -804,8 +804,7 @@ static void* resp_listener(void *opaque)
     int read_cnt, phase; // WARN: phase is not reliable code
     VirtQueueElement *elem;
     char *buf = NULL;
-    int mapping[RING_SIZE]; // record mapping of switch for aio
-    memset(mapping, 0, RING_SIZE);
+    GHashTable *mapping = g_hash_table_new(g_int_hash, g_int_equal);
 
     // force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
 
@@ -853,12 +852,17 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        // index is original offset, maybe switched
-        // only smaller offset can be switched to larger one (0 is unswitched)
-        index = mapping[index] == 0 ? index : mapping[index];
+        force_printf("[resp_listener] recv header [vq_nr:%d, index:%d, len:%d]",
+                     vq_nr, index, len);
+        // switched
+        if (g_hash_table_contains(mapping, GINT_TO_POINTER(index))) {
+            index = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(index)));
+            g_hash_table_remove(mapping, GINT_TO_POINTER(index));
+            force_printf("[resp_listener] switched to [index:%d]", index);
+        }
         elem = comm_ctx->ring[index];
-        force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
-                     index, elem);
+        // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
+        //              index, elem);
 
         vq = lookup_vq(vdev, vq_nr);
         if (!vq) {
@@ -910,9 +914,9 @@ listen_data:
             VirtQueueElement *tmp = comm_ctx->ring[index];
             comm_ctx->ring[index] = comm_ctx->ring[tmp_recved % RING_SIZE];
             comm_ctx->ring[tmp_recved % RING_SIZE] = tmp;
-            mapping[tmp_recved] = index;
-            force_printf("[resp_listener] switch elem at [offset:%d] to [recved:%d], recording [mapping[recved]:%d]",
-                         index, tmp_recved % RING_SIZE, mapping[tmp_recved]);
+            g_hash_table_insert(mapping, GINT_TO_POINTER(comm_ctx->ring[index]->index), GINT_TO_POINTER(index));
+            force_printf("[resp_listener] switch elem at [offset:%d] to [recved:%d]",
+                         index, tmp_recved % RING_SIZE);
         }
 
 done:
@@ -922,6 +926,7 @@ done:
     }
 
     // force_printf("[resp_listener] return");
+    g_hash_table_destroy(mapping);
     qatomic_set(&comm_ctx->recving, false);
     sem_post(&comm_ctx->sem2);
     return NULL;
@@ -973,8 +978,9 @@ static void* route_to_remote(void *opaque)
         int tmp_sent = qatomic_read(&comm_ctx->sent);
         int header[4];
         header[0] = vq_nr;
-        // header[1] = elem->index;
-        header[1] = tmp_sent % RING_SIZE;
+        header[1] = elem->index;
+        // header[1] = tmp_sent % RING_SIZE;
+        // header[1] = tmp_sent;
         header[2] = 0;
         for (int i = 0; i < elem->out_num; i++) {
             header[2] += elem->out_sg[i].iov_len;
@@ -995,8 +1001,8 @@ static void* route_to_remote(void *opaque)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(send_uring);
 
-        force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] with [out_num:%d in_num:%d]",
-                     header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
+        // force_printf("[route_to_remote] sent header [vq_nr:%d, index:%d, out_len:%d, in_len:%d] with [out_num:%d in_num:%d]",
+        //              header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
@@ -1018,7 +1024,7 @@ static void* route_to_remote(void *opaque)
         // force_printf("[route_to_remote] sent success");
 
         // neglect full first
-        force_printf("[route_to_remote] send elem at offset [%d]", header[1]);
+        force_printf("[route_to_remote] send elem at offset [%d] for vq [%d]", header[1], header[0]);
         comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
         qatomic_fetch_inc(&comm_ctx->sent);
         // force_printf("[route_to_remote] comm_ctx->sent turns to be [%d]", qatomic_read(&comm_ctx->sent));
