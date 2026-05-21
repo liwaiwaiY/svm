@@ -362,7 +362,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     // force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
     if (len == 0) {
         // force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
-        return;
+        goto free;
     }
 
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
@@ -413,8 +413,14 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         io_uring_cqe_seen(send_uring, cqe);
     }
 
-    g_free(elem->out_sg[0].iov_base);
-    g_free(elem->in_sg[0].iov_base);
+    g_free(resp_iov);
+free:
+    for (int i = 0; i < elem->out_num; i++)
+        g_free(elem->out_sg[i].iov_base);
+    for (int i = 0; i < elem->in_num; i++)
+        g_free(elem->in_sg[i].iov_base);
+    g_free(elem->out_sg);
+    g_free(elem->in_sg);
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
@@ -556,6 +562,8 @@ static void remote_stub_read_handler(void *opaque)
     while (read_cnt < sizeof(int) * out_num) {
         sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
+        io_uring_submit(resp_uring);
+        io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
             goto link_err;
@@ -566,9 +574,12 @@ static void remote_stub_read_handler(void *opaque)
         tmp = 0;
         io_uring_cqe_seen(resp_uring, cqe);
     }
+    read_cnt = 0;
     while (read_cnt < sizeof(int) * in_num) {
         sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
+        io_uring_submit(resp_uring);
+        io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
             goto link_err;
@@ -584,9 +595,11 @@ static void remote_stub_read_handler(void *opaque)
         sqe = io_uring_get_sqe(resp_uring);
         io_uring_prep_recv(sqe, fd, out_sg[i].iov_base,
                            out_sg[i].iov_len, MSG_WAITALL);
+        io_uring_submit(resp_uring);
+        io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(cqe);
-            goto out_err;
+            goto data_err;
         }
     }
 
@@ -874,7 +887,7 @@ listen_header:
         //              vq_nr, sent, len);
         // switched
         while (g_hash_table_contains(mapping, GINT_TO_POINTER(sent))) {
-            int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(isent)));
+            int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(sent)));
             g_hash_table_remove(mapping, GINT_TO_POINTER(sent));
             // force_printf("[resp_listener] nested remapping: [sent:%d] -> [tmp:%d]", sent, tmp);
             sent = tmp;
@@ -895,13 +908,16 @@ listen_data:
         for (int i = 0; i < elem->in_num; i++) {
             sqe = io_uring_get_sqe(resp_uring);
             io_uring_prep_recv(sqe, stub, elem->in_sg[i].iov_base,
-                               MIN(elem->in_sg[i].iov_len, len-read_cnt),
+                               MIN(elem->in_sg[i].iov_len, len - read_cnt),
                                MSG_WAITALL);
+            io_uring_submit(resp_uring);
             io_uring_wait_cqe(resp_uring, &cqe);
             if (cqe->res <= 0) {
                 io_uring_cqe_seen(resp_uring, cqe);
                 goto link_err;
             }
+            // read_cnt += elem->in_sg[i].iov_len;
+            read_cnt += cqe->res;
         }
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-recv.log", "RECV",
@@ -1001,11 +1017,11 @@ static void* route_to_remote(void *opaque)
         msg_sg[0].iov_base = header;
         msg_sg[0].iov_len = sizeof(header);
         msg_sg[1].iov_base = lens;
-        msg_sg[1].iov_len = header[2] + header[3];
+        msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
         memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(struct iovec));
         struct msghdr msg = {
             .msg_iov = msg_sg,
-            .msg_iovlen = elem->out_num + 1,
+            .msg_iovlen = elem->out_num + 2,
         };
         sqe = io_uring_get_sqe(send_uring);
         io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
@@ -1030,6 +1046,7 @@ static void* route_to_remote(void *opaque)
             io_uring_cqe_seen(send_uring, cqe);
         }
 
+        g_free(lens);
         g_free(msg_sg);
 
         // force_printf("[route_to_remote] sent success");
