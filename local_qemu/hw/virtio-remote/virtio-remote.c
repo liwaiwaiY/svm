@@ -58,16 +58,16 @@
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 #define RING_SIZE (IO_URING_DEPTH * 4)
 
-__attribute__((format(printf, 1, 2)))
-void force_printf(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    printf("\n");
-    va_end(ap);
-    fflush(stdout);
-}
+// __attribute__((format(printf, 1, 2)))
+// void force_printf(const char *fmt, ...)
+// {
+//     va_list ap;
+//     va_start(ap, fmt);
+//     vprintf(fmt, ap);
+//     printf("\n");
+//     va_end(ap);
+//     fflush(stdout);
+// }
 
 // static void ensure_log_dir(const char *dir)
 // {
@@ -390,8 +390,8 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
         .msg_iov = resp_iov,
         .msg_iovlen = sgs + 1,
     };
-    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, sent:%d, len: %d]",
-                 resp_header[0], resp_header[1], resp_header[2]);
+    // force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, sent:%d, len: %d]",
+    //              resp_header[0], resp_header[1], resp_header[2]);
 
     // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
     //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
@@ -553,8 +553,8 @@ static void remote_stub_read_handler(void *opaque)
               (req_header[10] << 16) | (req_header[11] << 24);
     in_num  = req_header[12] | (req_header[13] << 8) |
               (req_header[14] << 16) | (req_header[15] << 24);
-    force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-                 vq_nr, sent, out_num, in_num);
+    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+    //              vq_nr, sent, out_num, in_num);
 
     out_sg = g_new0(iovec, out_num);
     in_sg = g_new0(iovec, in_num);
@@ -571,7 +571,8 @@ static void remote_stub_read_handler(void *opaque)
         }
         out_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
         out_sg[i].iov_base = g_new(char, out_sg[i].iov_len);
-        force_printf("[???? out sg] id [%d] len [%ld]", i, out_sg[i].iov_len);
+        // force_printf("[???? out sg] id [%d] len [%ld]", i, out_sg[i].iov_len);
+        io_uring_cqe_seen(resp_uring, cqe);
     }
 
     for (int i = 0; i < in_num; i++) {
@@ -585,7 +586,8 @@ static void remote_stub_read_handler(void *opaque)
         }
         in_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
         in_sg[i].iov_base = g_new(char, in_sg[i].iov_len);
-        force_printf("[???? in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
+        // force_printf("[???? in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
+        io_uring_cqe_seen(resp_uring, cqe);
     }
 
     for (int i = 0; i < out_num; i++) { // read out datas
@@ -598,6 +600,7 @@ static void remote_stub_read_handler(void *opaque)
             io_uring_cqe_seen(resp_uring, cqe);
             goto data_err;
         }
+        io_uring_cqe_seen(resp_uring, cqe);
     }
 
     // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
@@ -668,7 +671,7 @@ static void remote_stub_read_handler(void *opaque)
     ctx->out_sg = NULL;
     ctx->in_sg = NULL;
 
-    force_printf("[remote_stub_read_handler] return");
+    // force_printf("[remote_stub_read_handler] return");
     return;
 
 link_err:
@@ -677,7 +680,7 @@ link_err:
     g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
     exit(0);
 data_err:
-    force_printf("[????]data error");
+    // force_printf("[????]data error");
     for (int i = 0; i < out_num && !out_sg[i].iov_base; i++)
         g_free(out_sg[i].iov_base);
     for (int i = 0; i < in_num && !in_sg[i].iov_base; i++)
@@ -877,8 +880,8 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
-                     vq_nr, sent, len);
+        // force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
+        //              vq_nr, sent, len);
         // switched
         while (g_hash_table_contains(mapping, GINT_TO_POINTER(sent))) {
             int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(sent)));
@@ -912,6 +915,7 @@ listen_data:
             }
             // read_cnt += elem->in_sg[i].iov_len;
             read_cnt += cqe->res;
+            io_uring_cqe_seen(resp_uring, cqe);
         }
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-recv.log", "RECV",
@@ -1018,12 +1022,12 @@ static void* route_to_remote(void *opaque)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(send_uring);
 
-        force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-                     header[0], header[1], header[2], header[3]);
-        for (int i = 0; i < header[2]; i++)
-            force_printf("[???? out_sg] len [%d] [%d]", i, lens[i]);
-        for (int i = 0; i < header[3]; i++)
-            force_printf("[?!!! in sg]  len [%d] [%d]", i + header[2], lens[i + header[2]]);
+        // force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+        //              header[0], header[1], header[2], header[3]);
+        // for (int i = 0; i < header[2]; i++)
+        //     force_printf("[???? out_sg] len [%d] [%d]", i, lens[i]);
+        // for (int i = 0; i < header[3]; i++)
+        //     force_printf("[?!!! in sg]  len [%d] [%d]", i + header[2], lens[i + header[2]]);
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
