@@ -16,6 +16,7 @@
 typedef struct VirtQueue VirtQueue;
 typedef struct VirtIODevice VirtIODevice;
 typedef struct VirtQueueElement VirtQueueElement;
+typedef struct iovec iovec;
 
 typedef struct RemoteVQueueCtx {
     int resp_fd;
@@ -28,14 +29,6 @@ typedef struct RemoteVQueueCtx {
     // VirtQueueElement elem;
     void *elem;
 } RemoteVQueueCtx;
-
-// Struct to hold zero-copy data for cleanup
-typedef struct {
-    struct iovec *iov;
-    int iov_count;
-    char *msg_header;
-    void *vdev;
-} zc_data;
 
 bool check_virtio_device_remote(VirtIODevice *vdev);
 

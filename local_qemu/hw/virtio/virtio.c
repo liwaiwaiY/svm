@@ -2663,12 +2663,8 @@ void virtio_delete_queue(VirtQueue *vq)
     vq->vring.num_default = 0;
     vq->handle_output = NULL;
     // cmsvm
-    // virtio_remote_ctx_free(vq);
-    if (vq->remote_ctx) {
-        RemoteVQueueCtx *remote_ctx = vq->remote_ctx;
-        g_free(remote_ctx->out_buf);
-        g_free(remote_ctx->in_buf);
-        g_free(remote_ctx);
+    if (vq->remote_ctx) { // remote_stub
+        g_free(vq->remote_ctx);
         vq->remote_ctx = NULL;
     }
     g_free(vq->used_elems);
@@ -4244,8 +4240,6 @@ static void virtio_device_free_virtqueues(VirtIODevice *vdev)
         // virtio_remote_ctx_free(vdev->vq[i]);
         if (vdev->vq[i].remote_ctx) {
             RemoteVQueueCtx *remote_ctx = vdev->vq[i].remote_ctx;
-            g_free(remote_ctx->out_buf);
-            g_free(remote_ctx->in_buf);
             g_free(remote_ctx);
             vdev->vq[i].remote_ctx = NULL;
         }

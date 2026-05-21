@@ -58,16 +58,16 @@
 #define IO_URING_DEPTH 32 // maximum concurrent reqs
 #define RING_SIZE (IO_URING_DEPTH * 4)
 
-// __attribute__((format(printf, 1, 2)))
-// void force_printf(const char *fmt, ...)
-// {
-//     va_list ap;
-//     va_start(ap, fmt);
-//     vprintf(fmt, ap);
-//     printf("\n");
-//     va_end(ap);
-//     fflush(stdout);
-// }
+__attribute__((format(printf, 1, 2)))
+void force_printf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    printf("\n");
+    va_end(ap);
+    fflush(stdout);
+}
 
 // static void ensure_log_dir(const char *dir)
 // {
@@ -92,7 +92,7 @@
 // }
 
 // static void log_hex_dump_iov(const char *filepath, const char *prefix,
-//                              int seq, struct iovec *iov, int iov_cnt)
+//                              int seq, iovec *iov, int iov_cnt)
 // {
 //     FILE *f = fopen(filepath, "a");
 //     int total = 0, i = 0, off = 0;
@@ -380,18 +380,18 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     while (cnt < len)
         cnt += elem->in_sg[sgs++].iov_len;
 
-    struct iovec *resp_iov = g_new0(struct iovec, sgs + 1);
+    iovec *resp_iov = g_new0(iovec, sgs + 1);
     resp_iov[0].iov_base = resp_header;
-    resp_iov[0].iov_len = size(resp_header);
-    memcpy(resp_iov + 1, elem->in_sg, sizeof(struct iovec) * sgs);
+    resp_iov[0].iov_len = sizeof(resp_header);
+    memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
     resp_iov[sgs - 1].iov_len -= (cnt - len);
 
     struct msghdr msg = {
         .msg_iov = resp_iov,
         .msg_iovlen = sgs + 1,
     };
-    // force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, offset:%d, len: %d]",
-    //              resp_header[0], resp_header[1], resp_header[2]);
+    force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, sent:%d, len: %d]",
+                 resp_header[0], resp_header[1], resp_header[2]);
 
     // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
     //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
@@ -415,12 +415,12 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
 
     g_free(resp_iov);
 free:
-    for (int i = 0; i < elem->out_num; i++)
+    for (int i = 0; i < elem->out_num&& !elem->out_sg[i].iov_base; i++) {
         g_free(elem->out_sg[i].iov_base);
-    for (int i = 0; i < elem->in_num; i++)
+    }
+    for (int i = 0; i < elem->in_num && !elem->in_sg[i].iov_base; i++) {
         g_free(elem->in_sg[i].iov_base);
-    g_free(elem->out_sg);
-    g_free(elem->in_sg);
+    }
 }
 
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
@@ -516,7 +516,7 @@ static void remote_stub_read_handler(void *opaque)
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     uint8_t req_header[4 * sizeof(int)];
-    struct iovec* out_sg, in_sg;
+    iovec *out_sg, *in_sg;
     int read_cnt, vq_nr, sent, out_num, in_num;
 
     if (!resp_uring) {
@@ -552,24 +552,24 @@ static void remote_stub_read_handler(void *opaque)
               (req_header[10] << 16) | (req_header[11] << 24);
     in_num  = req_header[12] | (req_header[13] << 8) |
               (req_header[14] << 16) | (req_header[15] << 24);
-    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-    //              vq_nr, sent, out_num, in_num);
+    force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+                 vq_nr, sent, out_num, in_num);
 
-    out_sg = g_new0(struct iovec, out_num);
-    in_sg = g_new0(struct iovec, in_num);
+    out_sg = g_new0(iovec, out_num);
+    in_sg = g_new0(iovec, in_num);
     int tmp = 0;
     read_cnt = 0;
     while (read_cnt < sizeof(int) * out_num) {
         sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, &tmp, 4, MSG_WAITALL);
+        io_uring_prep_recv(sqe, fd, &tmp, sizeof(int), MSG_WAITALL);
         io_uring_submit(resp_uring);
         io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
-            goto link_err;
+            goto data_err;
         }
-        out_sg[(read_cnt / 4)].iov_len = tmp;
-        out_sg[(read_cnt / 4)].iov_base = g_new0(char, tmp);
+        out_sg[(read_cnt / sizeof(int))].iov_len = tmp;
+        out_sg[(read_cnt / sizeof(int))].iov_base = g_new0(char, tmp);
         read_cnt += cqe->res;
         tmp = 0;
         io_uring_cqe_seen(resp_uring, cqe);
@@ -582,7 +582,7 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
             io_uring_cqe_seen(resp_uring, cqe);
-            goto link_err;
+            goto data_err;
         }
         in_sg[(read_cnt / 4)].iov_len = tmp;
         in_sg[(read_cnt / 4)].iov_base = g_new0(char, tmp);
@@ -598,7 +598,7 @@ static void remote_stub_read_handler(void *opaque)
         io_uring_submit(resp_uring);
         io_uring_wait_cqe(resp_uring, &cqe);
         if (cqe->res <= 0) {
-            io_uring_cqe_seen(cqe);
+            io_uring_cqe_seen(resp_uring, cqe);
             goto data_err;
         }
     }
@@ -611,8 +611,7 @@ static void remote_stub_read_handler(void *opaque)
     if (!vq) {
         // force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
         //              vq_nr, DEVICE(vdev)->id);
-        g_free(out_buf);
-        return;
+        goto data_err;
     }
     // force_printf("[remote_stub_read_handler] found vq");
 
@@ -662,19 +661,17 @@ static void remote_stub_read_handler(void *opaque)
     // force_printf("[remote_stub_read_handler] call bh to handle");
     aio_bh_poll(qemu_get_aio_context());
 
-    // test to free in push
-    // early free
-    // g_free(out_buf);
-    // g_free(ctx->in_buf);
     // reset remote_ctx
     ctx->elem = NULL;
     ctx->elem_index = 0;
     ctx->out_num = 0;
     ctx->in_num = 0;
+    g_free(out_sg);
+    g_free(in_sg);
     ctx->out_sg = NULL;
     ctx->in_sg = NULL;
 
-    // force_printf("[remote_stub_read_handler] return");
+    force_printf("[remote_stub_read_handler] return");
     return;
 
 link_err:
@@ -683,9 +680,10 @@ link_err:
     g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
     exit(0);
 data_err:
-    for (int i = 0; i < out_num; i++)
+    force_printf("[????]data error");
+    for (int i = 0; i < out_num && !out_sg[i].iov_base; i++)
         g_free(out_sg[i].iov_base);
-    for (int i = 0; i < in_num; i++)
+    for (int i = 0; i < in_num && !in_sg[i].iov_base; i++)
         g_free(in_sg[i].iov_base);
     g_free(out_sg);
     g_free(in_sg);
@@ -833,7 +831,6 @@ static void* resp_listener(void *opaque)
     int vq_nr, sent, len, tmp_recved;
     int read_cnt, phase; // WARN: phase is not reliable code
     VirtQueueElement *elem;
-    char *buf = NULL;
     GHashTable *mapping = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     // force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
@@ -883,8 +880,8 @@ listen_header:
         len   = resp_header[8] | (resp_header[9] << 8) |
                 (resp_header[10] << 16) | (resp_header[11] << 24);
 
-        // force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
-        //              vq_nr, sent, len);
+        force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
+                     vq_nr, sent, len);
         // switched
         while (g_hash_table_contains(mapping, GINT_TO_POINTER(sent))) {
             int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(sent)));
@@ -894,7 +891,7 @@ listen_header:
         }
         // force_printf("[resp_listener] done nested remapping at [sent:%d]", sent);
         elem = comm_ctx->ring[sent % RING_SIZE];
-        // force_printf("[resp_listener] fetch elem at [offset:%d,addr:%p]",
+        // force_printf("[resp_listener] fetch elem at [sent:%d,addr:%p]",
         //              sent, elem);
 
         vq = lookup_vq(vdev, vq_nr);
@@ -905,7 +902,7 @@ listen_header:
 
 listen_data:
         read_cnt = 0;
-        for (int i = 0; i < elem->in_num; i++) {
+        for (int i = 0; i < elem->in_num && read_cnt < len; i++) {
             sqe = io_uring_get_sqe(resp_uring);
             io_uring_prep_recv(sqe, stub, elem->in_sg[i].iov_base,
                                MIN(elem->in_sg[i].iov_len, len - read_cnt),
@@ -950,8 +947,6 @@ done:
 
 link_err:
     if (!reconnect_tcp_socket(stub)) {
-        if (buf)
-            g_free(buf);
         // force_printf("[resp_listener] reconnection error");
         exit(0);
     }
@@ -994,7 +989,7 @@ static void* route_to_remote(void *opaque)
         //     sem_wait(&comm_ctx->sem3);
 
         // send data as [vq_nr, index, out_len, in_len, out_data]
-        struct iovec *msg_sg = g_new0(struct iovec, elem->out_num + 2);
+        iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
         int tmp_sent = qatomic_read(&comm_ctx->sent);
         // directly write into ring
         comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
@@ -1018,7 +1013,7 @@ static void* route_to_remote(void *opaque)
         msg_sg[0].iov_len = sizeof(header);
         msg_sg[1].iov_base = lens;
         msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
-        memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(struct iovec));
+        memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
         struct msghdr msg = {
             .msg_iov = msg_sg,
             .msg_iovlen = elem->out_num + 2,
@@ -1028,8 +1023,8 @@ static void* route_to_remote(void *opaque)
         io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
         io_uring_submit(send_uring);
 
-        // force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_len:%d, in_len:%d] with [out_num:%d in_num:%d]",
-        //              header[0], header[1], header[2], header[3], elem->out_num, elem->in_num);
+        force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+                     header[0], header[1], header[2], header[3]);
 
         // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
