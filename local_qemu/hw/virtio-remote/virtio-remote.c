@@ -985,14 +985,12 @@ static void* cqe_clean(void *opaque)
             break;
 
         io_uring_wait_cqe(send_uring, &cqe);
-        iovec *msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
         io_uring_cqe_seen(send_uring, cqe);
-
+        iovec *msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
         if (cqe->flags & IORING_CQE_F_MORE) {
             io_uring_wait_cqe(send_uring, &cqe);
             io_uring_cqe_seen(send_uring, cqe);
         }
-
         qatomic_fetch_inc(&clean_param->cleaned);
         sem_post(&clean_param->sem3);
 
@@ -1036,7 +1034,7 @@ static void* route_to_remote(void *opaque)
                         cqe_clean, clean_param, QEMU_THREAD_DETACHED);
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
-        while (qatomic_read(&comm_ctx->sent) - qatomic_read(&clean_param->cleaned) < IO_URING_DEPTH)
+        while (qatomic_read(&comm_ctx->sent) - qatomic_read(&clean_param->cleaned) >= IO_URING_DEPTH)
             sem_wait(&clean_param->sem3);
         // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
         //     sem_wait(&comm_ctx->sem3);
