@@ -1008,27 +1008,33 @@ static void* cqe_clean(void *opaque)
         // } while (cqe->flags & IORING_CQE_F_MORE);
 
         int flags = 0;
+        int i = 0;
         do {
             if(io_uring_wait_cqe(send_uring, &cqe))
                 continue;
             else {
                 if (cqe->flags & IORING_CQE_F_MORE) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F MORE] [%p]", msg_sg);
+                    force_printf("[F MORE] [%p] [%d]", msg_sg, i);
                     flags = cqe->flags;
-                } else if (cqe->flags & IORING_CQE_F_NOTIF) {
+                    i++;
+                }
+                if (cqe->flags & IORING_CQE_F_NOTIF) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F NOTIF] [%p]", msg_sg);
+                    force_printf("[F NOTIF] [%p] [%d]", msg_sg, i);
                     flags = cqe->flags;
+                    i++;
                 } else {
                     // msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
                     // force_printf("[?????] [%p]", msg_sg);
                 }
+                
                 io_uring_cqe_seen(send_uring, cqe);
             }
         } while(flags & IORING_CQE_F_MORE);
 
         force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
+
 
         qatomic_fetch_inc(&clean_param->cleaned);
         sem_post(&clean_param->sem3);
