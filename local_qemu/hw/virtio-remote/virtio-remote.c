@@ -977,7 +977,7 @@ static void* cqe_clean(void *opaque)
 {
     CleanParam *clean_param = (CleanParam *)opaque;
     CommCTX *comm_ctx = clean_param->comm_ctx;
-    struct io_uring_cqe *cqe;
+    struct io_uring_cqe *cqe = NULL;
     iovec *msg_sg = NULL;
 
     while (true) {
@@ -987,26 +987,47 @@ static void* cqe_clean(void *opaque)
         if (!qatomic_read(&comm_ctx->sending) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(&comm_ctx->sent)))
             break;
 
-
         // io_uring_wait_cqe(send_uring, &cqe);
         // msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
         // io_uring_cqe_seen(send_uring, cqe);
-        // force_printf("[cqe_clean] 1 msg_sg[%p]", msg_sg);
         // if (cqe->flags & IORING_CQE_F_MORE) {
         //     io_uring_wait_cqe(send_uring, &cqe);
-        //     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
         //     io_uring_cqe_seen(send_uring, cqe);
-        //     force_printf("[cqe_clean] 2 msg_sg[%p]", msg_sg);
         // }
 
+        // do {
+        //     if(io_uring_wait_cqe(send_uring, &cqe)) // false
+        //         continue;
+        //     else {
+        //         if (cqe->flags & IORING_CQE_F_MORE) // additional cqe
+        //             msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+        //         else if (cqe->flags & IORING_CQE_F_NOTIF) // data can be securely reused
+
+        //         io_uring_cqe_seen(send_uring, cqe);
+        //     }
+        // } while (cqe->flags & IORING_CQE_F_MORE);
+
+        int flags = 0;
         do {
             if(io_uring_wait_cqe(send_uring, &cqe))
                 continue;
-            else
+            else {
+                if (cqe->flags & IORING_CQE_F_MORE) {
+                    msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+                    force_printf("[F MORE] [%p]", msg_sg);
+                    flags = cqe->flags;
+                } else if (cqe->flags & IORING_CQE_F_NOTIF) {
+                    msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+                    force_printf("[F NOTIF] [%p]", msg_sg);
+                    flags = cqe->flags;
+                } else {
+                    // msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+                    // force_printf("[?????] [%p]", msg_sg);
+                }
                 io_uring_cqe_seen(send_uring, cqe);
-        } while (cqe->flags & IORING_CQE_F_MORE);
-        msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-        io_uring_cqe_seen(send_uring, cqe);
+            }
+        } while(flags & IORING_CQE_F_MORE);
+
         force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
 
         qatomic_fetch_inc(&clean_param->cleaned);
