@@ -1000,9 +1000,13 @@ static void* cqe_clean(void *opaque)
         // }
 
         do {
-            if(!io_uring_wait_cqe(send_uring, &cqe)) continue;
+            if(io_uring_wait_cqe(send_uring, &cqe))
+                continue;
+            else
+                io_uring_cqe_seen(send_uring, cqe);
         } while (cqe->flags & IORING_CQE_F_MORE);
         msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+        io_uring_cqe_seen(send_uring, cqe);
         force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
 
         qatomic_fetch_inc(&clean_param->cleaned);
