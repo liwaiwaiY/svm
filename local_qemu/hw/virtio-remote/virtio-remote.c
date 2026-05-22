@@ -1000,14 +1000,10 @@ static void* cqe_clean(void *opaque)
         // }
 
         do {
-            io_uring_wait_cqe(send_uring, &cqe);
-            if (cqe->flags & IORING_CQE_F_MORE) {
-                msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                io_uring_cqe_seen(send_uring, cqe);
-                break;
-            }
-        } while (true);
-        // force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
+            if(!io_uring_wait_cqe(send_uring, &cqe)) continue;
+        } while (cqe->flags & IORING_CQE_F_MORE);
+        msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+        force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
 
         qatomic_fetch_inc(&clean_param->cleaned);
         sem_post(&clean_param->sem3);
@@ -1017,7 +1013,8 @@ static void* cqe_clean(void *opaque)
         g_free(msg_sg[1].iov_base);
         // 2->len is guest memeory
         g_free(msg_sg);
-        // force_printf("[cqe_clean] next turn");
+        msg_sg = NULL;
+        force_printf("[cqe_clean] next turn");
     }
 
     sem_post(&clean_param->sem3);
@@ -1092,7 +1089,7 @@ static void* route_to_remote(void *opaque)
         sqe = io_uring_get_sqe(send_uring);
         io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
         io_uring_sqe_set_data(sqe, msg_sg);
-        // force_printf("[route_to_remote] set data msg_sg[%p]", msg_sg);
+        force_printf("[route_to_remote] set data msg_sg[%p]", msg_sg);
         io_uring_submit(send_uring);
 
         // force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
