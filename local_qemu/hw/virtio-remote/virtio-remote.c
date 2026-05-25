@@ -1012,25 +1012,28 @@ static void* cqe_clean(void *opaque)
         // } while (cqe->flags & IORING_CQE_F_MORE);
 
         int i = 0;
-        while(i == 0 || !(cqe->flags & IORING_CQE_F_NOTIF)) {
+        bool done = false;
+        while(!done) {
             if(io_uring_wait_cqe(send_uring, &cqe)) {
                 force_printf("[cqe_clean] wrong at wait cqe");
                 continue;
             } else {
                 if (!(cqe->flags & IORING_CQE_F_MORE) && !(cqe->flags & IORING_CQE_F_NOTIF)) {
                     io_uring_cqe_seen(send_uring, cqe);
-                    force_printf("[??] unkonwn flag");
+                    force_printf("[??] unkonwn flag res=%d flags=0x%x", cqe->res, cqe->flags);
                     continue;
                 }
+                int m = 0;
                 if (cqe->flags & IORING_CQE_F_MORE) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F MORE] [%p] [%d] [%d] [%d]", msg_sg, i, j, k);
-                } 
+                    force_printf("[F MORE] [%p] [%d] [%d] [%d] [%d]", msg_sg, m++, i, j, k);
+                }
                 if (cqe->flags & IORING_CQE_F_NOTIF) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F NOTIF] [%p] [%d] [%d] [%d]", msg_sg, i, j, k);
+                    force_printf("[F NOTIF] [%p] [%d] [%d] [%d] [%d]", msg_sg, m++, i, j, k);
                 }
                 i++;
+                done = cqe->flags & IORING_CQE_F_NOTIF;
                 io_uring_cqe_seen(send_uring, cqe);
             }
         }
