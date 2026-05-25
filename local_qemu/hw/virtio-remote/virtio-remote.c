@@ -380,7 +380,9 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     while (cnt < len)
         cnt += elem->in_sg[sgs++].iov_len;
 
+    force_printf("oh no push");
     iovec *resp_iov = g_new0(iovec, sgs + 1);
+    force_printf("oh yes push");
     resp_iov[0].iov_base = resp_header;
     resp_iov[0].iov_len = sizeof(int) * 3;
     memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
@@ -572,6 +574,7 @@ static void remote_stub_read_handler(void *opaque)
         out_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
         force_printf("[???? out sg] id [%d] len [%ld]", i, out_sg[i].iov_len);
         out_sg[i].iov_base = g_new(char, out_sg[i].iov_len);
+        force_printf("[???? out yes]");
         io_uring_cqe_seen(resp_uring, cqe);
     }
 
@@ -585,8 +588,9 @@ static void remote_stub_read_handler(void *opaque)
             goto data_err;
         }
         in_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
-        force_printf("[???? in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
+        force_printf("[!!!! in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
         in_sg[i].iov_base = g_new(char, in_sg[i].iov_len);
+        force_printf("[!!!! in yes]");
         io_uring_cqe_seen(resp_uring, cqe);
     }
 
@@ -1073,7 +1077,7 @@ static void* route_to_remote(void *opaque)
         }
         for (int i = 0; i < elem->in_num; i++) {
             lens[i + elem->out_num] = elem->in_sg[i].iov_len;
-            force_printf("[!!!! out sg] sending len: [%d:%d]", i, lens[i]);
+            force_printf("[!!!! in sg] sending len: [%d:%d]", i, lens[i]);
         }
 
         msg_sg[0].iov_base = header;
