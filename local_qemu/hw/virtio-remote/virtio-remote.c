@@ -1137,6 +1137,12 @@ static void* route_to_remote(void *opaque)
 
     // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
 
+    // batching with 2
+    int *lenss[2];
+    int *headers[2];
+    iovec *msgsgs[2];
+    int tmp = 0;
+
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
         // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
         //     sem_wait(&comm_ctx->sem3);
@@ -1182,30 +1188,51 @@ static void* route_to_remote(void *opaque)
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
         //                  msg_sg + 1, elem->out_num);
 
-        io_uring_wait_cqe(send_uring, &cqe);
-        void *user_data = (void *)io_uring_cqe_get_data(cqe);
-        if (cqe->flags & IORING_CQE_F_MORE) {
-            force_printf("[F MORE] [%p] [1]", user_data);
-        } 
-        if (cqe->flags & IORING_CQE_F_NOTIF) {
-            force_printf("[F NOTIF] [%p] [1]", user_data);
+        if (tmp != 2) {
+            lenss[tmp] = lens;
+            headers[tmp] = header;
+            msgsgs[tmp] = msg_sg;
+            tmp++;
         }
-        io_uring_cqe_seen(send_uring, cqe);
+        if (tmp == 2) { // batching wait
 
-        if (cqe->flags & IORING_CQE_F_MORE) {
-            io_uring_wait_cqe(send_uring, &cqe);
-            if (cqe->flags & IORING_CQE_F_MORE) {
-                force_printf("[F MORE] [%p] [2]", user_data);
-            } 
-            if (cqe->flags & IORING_CQE_F_NOTIF) {
-                force_printf("[F NOTIF] [%p] [2]", user_data);
+            for (int j = 0; j < tmp; j++) {
+                do {
+                    while (!io_uring_wait_cqe(send_uring, &cqe))
+                        force_printf("[CQE] fail");
+                    void *user_data = (void *)io_uring_cqe_get_data(cqe);
+                    if (cqe->flags & IORING_CQE_F_MORE) {
+                        force_printf("[F MORE] [%p] [1]", user_data);
+                        io_uring_cqe_seen(send_uring, cqe);
+                    }
+                    if (cqe->flags & IORING_CQE_F_NOTIF) {
+                        force_printf("[F NOTIF] [%p] [2]", user_data);
+                        io_uring_cqe_seen(send_uring, cqe);
+                    }
+                } while (cqe->flags & IORING_CQE_F_MORE);
             }
-            io_uring_cqe_seen(send_uring, cqe);
+
+            g_free(lenss[0]);
+            g_free(lenss[1]);
+            g_free(headers[0]);
+            g_free(headers[1]);
+            g_free(msgsgs[0]);
+            g_free(msgsgs[1]);
+
+            tmp = 0;
         }
 
-        g_free(lens);
-        g_free(header);
-        g_free(msg_sg);
+        // io_uring_wait_cqe(send_uring, &cqe);
+        // io_uring_cqe_seen(send_uring, cqe);
+
+        // if (cqe->flags & IORING_CQE_F_MORE) {
+        //     io_uring_wait_cqe(send_uring, &cqe);
+        //     io_uring_cqe_seen(send_uring, cqe);
+        // }
+
+        // g_free(lens);
+        // g_free(header);
+        // g_free(msg_sg);
 
         // force_printf("[route_to_remote] sent success");
 
