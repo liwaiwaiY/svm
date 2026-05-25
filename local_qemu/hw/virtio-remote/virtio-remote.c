@@ -553,8 +553,8 @@ static void remote_stub_read_handler(void *opaque)
               (req_header[10] << 16) | (req_header[11] << 24);
     in_num  = req_header[12] | (req_header[13] << 8) |
               (req_header[14] << 16) | (req_header[15] << 24);
-    force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-                 vq_nr, sent, out_num, in_num);
+    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+    //              vq_nr, sent, out_num, in_num);
 
     out_sg = g_new0(iovec, out_num);
     in_sg = g_new0(iovec, in_num);
@@ -587,14 +587,6 @@ static void remote_stub_read_handler(void *opaque)
         in_sg[i].iov_base = g_new(char, in_sg[i].iov_len);
         io_uring_cqe_seen(resp_uring, cqe);
     }
-
-    for (int i = 0; i < out_num; i++)
-        printf("[%ld]", out_sg[i].iov_len);
-    for (int i = 0; i < in_num; i++)
-        printf("[%ld]", in_sg[i].iov_len);
-    printf("\n");
-    fflush(stdout);
-
 
     for (int i = 0; i < out_num; i++) { // read out datas
         sqe = io_uring_get_sqe(resp_uring);
@@ -980,50 +972,50 @@ typedef struct CleanParam {
     bool cleaning;
 } CleanParam;
 
-static void* cqe_clean(void *opaque)
-{
-    CleanParam *clean_param = (CleanParam *)opaque;
-    struct io_uring_cqe *cqe = NULL;
-    iovec *msg_sg = NULL;
-    int flags = 0;
+// static void* cqe_clean(void *opaque)
+// {
+//     CleanParam *clean_param = (CleanParam *)opaque;
+//     struct io_uring_cqe *cqe = NULL;
+//     iovec *msg_sg = NULL;
+//     int flags = 0;
 
-    while (true) {
-        while (qatomic_read(&clean_param->cleaning) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(clean_param->sent))) {
-            sem_wait(&clean_param->sem4);
-        }
-        if (!qatomic_read(&clean_param->cleaning) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(clean_param->sent)))
-            break;
+//     while (true) {
+//         while (qatomic_read(&clean_param->cleaning) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(clean_param->sent))) {
+//             sem_wait(&clean_param->sem4);
+//         }
+//         if (!qatomic_read(&clean_param->cleaning) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(clean_param->sent)))
+//             break;
 
-        while(true) {
-            io_uring_wait_cqe(send_uring, &cqe);
-            flags = cqe->flags;
-            msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-            io_uring_cqe_seen(send_uring, cqe);
-            if (flags & IORING_CQE_F_MORE)
-                continue;
-            else if (flags & IORING_CQE_F_NOTIF)
-                break;
-            else
-                goto unknown_flags;
-        }
-        // force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
+//         while(true) {
+//             io_uring_wait_cqe(send_uring, &cqe);
+//             flags = cqe->flags;
+//             msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
+//             io_uring_cqe_seen(send_uring, cqe);
+//             if (flags & IORING_CQE_F_MORE)
+//                 continue;
+//             else if (flags & IORING_CQE_F_NOTIF)
+//                 break;
+//             else
+//                 goto unknown_flags;
+//         }
+//         // force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
 
-        qatomic_fetch_inc(&clean_param->cleaned);
-        sem_post(&clean_param->sem3);
-        g_free(msg_sg[0].iov_base);
-        g_free(msg_sg[1].iov_base);
-        // 2->len is guest memeory
-        g_free(msg_sg);
-        msg_sg = NULL;
-        // force_printf("[cqe_clean] next turn");
-    }
+//         qatomic_fetch_inc(&clean_param->cleaned);
+//         sem_post(&clean_param->sem3);
+//         g_free(msg_sg[0].iov_base);
+//         g_free(msg_sg[1].iov_base);
+//         // 2->len is guest memeory
+//         g_free(msg_sg);
+//         msg_sg = NULL;
+//         // force_printf("[cqe_clean] next turn");
+//     }
 
-    sem_post(&clean_param->sem3);
-    return NULL;
+//     sem_post(&clean_param->sem3);
+//     return NULL;
 
-unknown_flags:
-    exit(1);
-}
+// unknown_flags:
+//     exit(1);
+// }
 
 typedef struct SenderParam {
     VirtQueue *vq;
@@ -1040,24 +1032,99 @@ static void* route_to_remote(void *opaque)
     g_free(opaque);
     VirtQueueElement *elem;
     struct io_uring_sqe *sqe;
-    // struct io_uring_cqe *cqe;
+    struct io_uring_cqe *cqe;
     int vq_nr = virtio_get_queue_index(vq);
 
-    QemuThread cleaner;
-    CleanParam *clean_param = g_new0(CleanParam, 1);
-    clean_param->cleaned = 0;
-    clean_param->sent = &comm_ctx->sent;
-    clean_param->cleaning = true;
-    sem_init(&clean_param->sem3, 0, 0);
-    sem_init(&clean_param->sem4, 0, 0);
-    qemu_thread_create(&cleaner, "cqe_clean",
-                        cqe_clean, clean_param, QEMU_THREAD_JOINABLE);
+    // QemuThread cleaner;
+    // CleanParam *clean_param = g_new0(CleanParam, 1);
+    // clean_param->cleaned = 0;
+    // clean_param->sent = &comm_ctx->sent;
+    // clean_param->cleaning = true;
+    // sem_init(&clean_param->sem3, 0, 0);
+    // sem_init(&clean_param->sem4, 0, 0);
+    // qemu_thread_create(&cleaner, "cqe_clean",
+    //                     cqe_clean, clean_param, QEMU_THREAD_JOINABLE);
+
+    // while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
+    //     while (qatomic_read(&comm_ctx->sent) - qatomic_read(&clean_param->cleaned) >= IO_URING_DEPTH)
+    //         sem_wait(&clean_param->sem3);
+    //     // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
+    //     //     sem_wait(&comm_ctx->sem3);
+    //     // send data as [vq_nr, index, out_len, in_len, out_data]
+    //     iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
+    //     int tmp_sent = qatomic_read(&comm_ctx->sent);
+    //     // directly write into ring
+    //     comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
+    //     qatomic_fetch_inc(&comm_ctx->sent);
+
+    //     // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
+
+    //     int *header = g_new0(int, 4);
+    //     header[0] = vq_nr;
+    //     header[1] = tmp_sent;
+    //     header[2] = elem->out_num;
+    //     header[3] = elem->in_num;
+    //     int *lens = g_new0(int, header[2] + header[3]);
+    //     for (int i = 0; i < elem->out_num; i++)
+    //         lens[i] = elem->out_sg[i].iov_len;
+    //     for (int i = 0; i < elem->in_num; i++)
+    //         lens[i + elem->out_num] = elem->in_sg[i].iov_len;
+
+    //     for (int i = 0; i < header[2] + header[3]; i++)
+    //         printf("[%d]", lens[i]);
+    //     printf("\n");
+    //     fflush(stdout);
+
+    //     msg_sg[0].iov_base = header;
+    //     msg_sg[0].iov_len = sizeof(int) * 4;
+    //     msg_sg[1].iov_base = lens;
+    //     msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
+    //     memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
+    //     struct msghdr msg = {
+    //         .msg_iov = msg_sg,
+    //         .msg_iovlen = elem->out_num + 2,
+    //     };
+    //     sqe = io_uring_get_sqe(send_uring);
+    //     io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
+    //     io_uring_sqe_set_data(sqe, msg_sg);
+    //     // force_printf("[route_to_remote] set data msg_sg[%p]", msg_sg);
+    //     io_uring_submit(send_uring);
+
+    //     // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
+    //     //                  atomic_fetch_add(&local_send_seq, 1) + 1,
+    //     //                  msg_sg, 1);
+    //     // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
+    //     //                  atomic_fetch_add(&local_send_seq, 1) + 1,
+    //     //                  msg_sg + 1, elem->out_num);
+
+    //     // force_printf("[route_to_remote] sent success");
+
+    //     // neglect full first
+    //     force_printf("[route_to_remote] headers [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+    //                  header[0], header[1], header[2], header[3]);
+    //     sem_post(&comm_ctx->sem1);
+    //     sem_post(&clean_param->sem4);
+    // }
+
+    // qatomic_set(&clean_param->cleaning, false);
+    // sem_post(&clean_param->sem4);
+    // qemu_thread_join(&cleaner);
+    // sem_destroy(&clean_param->sem3);
+    // sem_destroy(&clean_param->sem4);
+    // g_free(clean_param);
+
+    // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
+
+    // int batch = 4;
+    // int batched = 0;
+    // int **headers = g_new0(int *, batch);
+    // int **lenss = g_new0(int *, batch);
+    // iovec **msgs = g_new0(iovec*, batch);
 
     while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
-        while (qatomic_read(&comm_ctx->sent) - qatomic_read(&clean_param->cleaned) >= IO_URING_DEPTH)
-            sem_wait(&clean_param->sem3);
         // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
         //     sem_wait(&comm_ctx->sem3);
+
         // send data as [vq_nr, index, out_len, in_len, out_data]
         iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
         int tmp_sent = qatomic_read(&comm_ctx->sent);
@@ -1077,12 +1144,6 @@ static void* route_to_remote(void *opaque)
             lens[i] = elem->out_sg[i].iov_len;
         for (int i = 0; i < elem->in_num; i++)
             lens[i + elem->out_num] = elem->in_sg[i].iov_len;
-
-        for (int i = 0; i < header[2] + header[3]; i++)
-            printf("[%d]", lens[i]);
-        printf("\n");
-        fflush(stdout);
-
         msg_sg[0].iov_base = header;
         msg_sg[0].iov_len = sizeof(int) * 4;
         msg_sg[1].iov_base = lens;
@@ -1105,89 +1166,73 @@ static void* route_to_remote(void *opaque)
         //                  atomic_fetch_add(&local_send_seq, 1) + 1,
         //                  msg_sg + 1, elem->out_num);
 
-        // force_printf("[route_to_remote] sent success");
+        // io_uring_wait_cqe(send_uring, &cqe);
+        // io_uring_cqe_seen(send_uring, cqe);
 
+        // if (cqe->flags & IORING_CQE_F_MORE) {
+        //     io_uring_wait_cqe(send_uring, &cqe);
+        //     io_uring_cqe_seen(send_uring, cqe);
+        // }
+
+        // force_printf("[route_to_remote] headers [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
+        //              header[0], header[1], header[2], header[3]);
+
+        // g_free(lens);
+        // g_free(header);
+        // g_free(msg_sg);
+
+        // force_printf("[route_to_remote] sent success");
         // neglect full first
-        force_printf("[route_to_remote] headers [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-                     header[0], header[1], header[2], header[3]);
         sem_post(&comm_ctx->sem1);
-        sem_post(&clean_param->sem4);
+
+        if (batched < batch) {
+            headers[batched] = header;
+            lenss[batched] = lens;
+            msgs[batched] = msg_sg;
+            batched++;
+        }
+        if (batched == batch) {
+            while(batched > 0) {
+                io_uring_wait_cqe(send_uring, &cqe);
+                int flags = cqe->flags;
+                io_uring_cqe_seen(send_uring, cqe);
+                if (flags & IORING_CQE_F_MORE)
+                    continue;
+                else if (flags & IORING_CQE_F_NOTIF)
+                    batched--;
+            }
+            for (int i = 0; i < batch; i++) {
+                g_free(headers[i]);
+                g_free(lenss[i]);
+                g_free(msgs[i]);
+                headers[i] = NULL;
+                lenss[i] = NULL;
+                msgs[i] = NULL;
+            }
+        }
     }
 
-    // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
+    while (batched > 0) {
+        io_uring_wait_cqe(send_uring, &cqe);
+        int flags = cqe->flags;
+        io_uring_cqe_seen(send_uring, cqe);
+        if (flags & IORING_CQE_F_MORE)
+            continue;
+        else if (flags & IORING_CQE_F_NOTIF)
+            batched--;
+    }
 
-    // while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
-    //     // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
-    //     //     sem_wait(&comm_ctx->sem3);
+    for (int i = 0; i < batch; i++) {
+        if (headers[i] == NULL)
+            break;
+        g_free(headers[i]);
+        g_free(lenss[i]);
+        g_free(msgs[i]);
+    }
 
-    //     // send data as [vq_nr, index, out_len, in_len, out_data]
-    //     iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
-    //     int tmp_sent = qatomic_read(&comm_ctx->sent);
-    //     // directly write into ring
-    //     comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
-    //     qatomic_fetch_inc(&comm_ctx->sent);
-
-    //     // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
-
-    //     int *header = g_new0(int, 4);
-    //     header[0] = vq_nr;
-    //     header[1] = tmp_sent;
-    //     header[2] = elem->out_num;
-    //     header[3] = elem->in_num;
-    //     int *lens = g_new0(int, header[2] + header[3]);
-    //     for (int i = 0; i < elem->out_num; i++)
-    //         lens[i] = elem->out_sg[i].iov_len;
-    //     for (int i = 0; i < elem->in_num; i++)
-    //         lens[i + elem->out_num] = elem->in_sg[i].iov_len;
-    //     msg_sg[0].iov_base = header;
-    //     msg_sg[0].iov_len = sizeof(int) * 4;
-    //     msg_sg[1].iov_base = lens;
-    //     msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
-    //     memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
-    //     struct msghdr msg = {
-    //         .msg_iov = msg_sg,
-    //         .msg_iovlen = elem->out_num + 2,
-    //     };
-    //     sqe = io_uring_get_sqe(send_uring);
-    //     io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
-    //     io_uring_sqe_set_data(sqe, msg_sg);
-    //     force_printf("[route_to_remote] set data msg_sg[%p]", msg_sg);
-    //     io_uring_submit(send_uring);
-
-    //     // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
-    //     //                  atomic_fetch_add(&local_send_seq, 1) + 1,
-    //     //                  msg_sg, 1);
-    //     // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
-    //     //                  atomic_fetch_add(&local_send_seq, 1) + 1,
-    //     //                  msg_sg + 1, elem->out_num);
-
-    //     // io_uring_wait_cqe(send_uring, &cqe);
-    //     // io_uring_cqe_seen(send_uring, cqe);
-
-    //     // if (cqe->flags & IORING_CQE_F_MORE) {
-    //     //     io_uring_wait_cqe(send_uring, &cqe);
-    //     //     io_uring_cqe_seen(send_uring, cqe);
-    //     // }
-
-    //     // g_free(lens);
-    //     // g_free(header);
-    //     // g_free(msg_sg);
-
-    //     // force_printf("[route_to_remote] sent success");
-
-    //     // neglect full first
-    //     // force_printf("[route_to_remote] send elem at offset [%d] for vq [%d]", header[1], header[0]);
-        
-    //     // force_printf("[route_to_remote] comm_ctx->sent turns to be [%d]", qatomic_read(&comm_ctx->sent));
-    //     sem_post(&comm_ctx->sem1);
-    // }
-
-    qatomic_set(&clean_param->cleaning, false);
-    sem_post(&clean_param->sem4);
-    qemu_thread_join(&cleaner);
-    sem_destroy(&clean_param->sem3);
-    sem_destroy(&clean_param->sem4);
-    g_free(clean_param);
+    g_free(headers);
+    g_free(lenss);
+    g_free(msgs);
 
     qatomic_set(&comm_ctx->sending, false);
     sem_post(&comm_ctx->sem1);
