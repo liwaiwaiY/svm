@@ -973,12 +973,16 @@ typedef struct CleanParam {
     CommCTX *comm_ctx;
 } CleanParam;
 
+int k = 0;
+
 static void* cqe_clean(void *opaque)
 {
     CleanParam *clean_param = (CleanParam *)opaque;
     CommCTX *comm_ctx = clean_param->comm_ctx;
     struct io_uring_cqe *cqe = NULL;
     iovec *msg_sg = NULL;
+
+    int j = 0;
 
     while (true) {
         while (qatomic_read(&comm_ctx->sending) && (qatomic_read(&clean_param->cleaned) >= qatomic_read(&comm_ctx->sent))) {
@@ -1007,33 +1011,31 @@ static void* cqe_clean(void *opaque)
         //     }
         // } while (cqe->flags & IORING_CQE_F_MORE);
 
-        int flags = 0;
         int i = 0;
-        do {
-            if(io_uring_wait_cqe(send_uring, &cqe))
+        while(i == 0 || !(cqe->flags & IORING_CQE_F_NOTIF)) {
+            if(io_uring_wait_cqe(send_uring, &cqe)) {
+                force_printf("[cqe_clean] wrong at wait cqe");
                 continue;
-            else {
+            } else {
                 if (!(cqe->flags & IORING_CQE_F_MORE) && !(cqe->flags & IORING_CQE_F_NOTIF)) {
                     io_uring_cqe_seen(send_uring, cqe);
+                    force_printf("[??] unkonwn flag");
                     continue;
                 }
                 if (cqe->flags & IORING_CQE_F_MORE) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F MORE] [%p] [%d]", msg_sg, i);
-                    flags = cqe->flags;
+                    force_printf("[F MORE] [%p] [%d] [%d] [%d]", msg_sg, i, j, k);
                 } 
                 if (cqe->flags & IORING_CQE_F_NOTIF) {
                     msg_sg = (iovec *)io_uring_cqe_get_data(cqe);
-                    force_printf("[F NOTIF] [%p] [%d]", msg_sg, i);
-                    flags = cqe->flags;
+                    force_printf("[F NOTIF] [%p] [%d] [%d] [%d]", msg_sg, i, j, k);
                 }
                 i++;
                 io_uring_cqe_seen(send_uring, cqe);
             }
-        } while(flags & IORING_CQE_F_MORE);
+        }
 
         force_printf("[cqe clean] get msg_sg [%p]", msg_sg);
-
 
         qatomic_fetch_inc(&clean_param->cleaned);
         sem_post(&clean_param->sem3);
@@ -1045,12 +1047,15 @@ static void* cqe_clean(void *opaque)
         g_free(msg_sg);
         msg_sg = NULL;
         force_printf("[cqe_clean] next turn");
+
+        j++;
     }
 
     sem_post(&clean_param->sem3);
     sem_destroy(&clean_param->sem3);
     sem_destroy(&clean_param->sem4);
     g_free(clean_param);
+    k++;
     return NULL;
 }
 
