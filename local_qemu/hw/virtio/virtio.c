@@ -158,7 +158,7 @@ struct VirtQueue
     bool host_notifier_enabled;
     QLIST_ENTRY(VirtQueue) node;
 
-    // cmsvm
+    // cmsvm: if the device lies in remote stub, it is not null
     void *remote_ctx;
 };
 
@@ -1926,8 +1926,8 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
     elem->index = head;
     elem->ndescs = 1;
     for (i = 0; i < out_num; i++) {
-        elem->out_addr[i] = addr[i];
-        elem->out_sg[i] = iov[i];
+        elem->out_addr[i] = addr[i]; // gpa
+        elem->out_sg[i] = iov[i]; // hva
     }
     for (i = 0; i < in_num; i++) {
         elem->in_addr[i] = addr[out_num + i];
@@ -2805,7 +2805,7 @@ static void virtio_irq(VirtQueue *vq)
      * have already called ->set_guest_notifiers() sometime before calling this
      * function.
      */
-    if (qemu_in_iothread()) {
+    if (qemu_in_iothread()) { // io thread has no BQL lock, so send event to main thread
         defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
     } else {
         virtio_notify_vector(vq->vdev, vq->vector);
@@ -2814,7 +2814,7 @@ static void virtio_irq(VirtQueue *vq)
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx) { // remote stub no need for guest
         return;
     }
 
@@ -2830,7 +2830,7 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 
 void virtio_notify_config(VirtIODevice *vdev)
 {
-    if (remote_virtio_notify_skip(vdev)) {
+    if (remote_virtio_notify_skip(vdev)) { // remote stub should skip
         return;
     }
 
@@ -2841,8 +2841,8 @@ void virtio_notify_config(VirtIODevice *vdev)
     vdev->generation++;
 
     // cmsvm
-    if (check_virtio_device_remote(vdev)) {
-        if (check_origin_qemu_in_iothread(vdev)) {
+    if (!check_virtio_device_remote(vdev)) { // local qemu
+        if (check_origin_qemu_in_iothread(vdev)) { // local qemu runs aio
             defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
         } else {
             virtio_notify_vector(vdev, vdev->config_vector);

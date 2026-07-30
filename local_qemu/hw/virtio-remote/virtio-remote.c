@@ -432,6 +432,7 @@ bool remote_virtio_notify_skip(VirtIODevice *vdev)
             continue;
         }
         if (virtqueue_get_remote_ctx(virtio_get_queue(vdev, n))) {
+            // remote stub, should skip notify
             return true;
         }
     }
