@@ -4024,7 +4024,7 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     void (*cb2)(EventNotifier *n);
     cb1 = NULL;
     cb2 = NULL;
-    if (unlikely(check_virtio_device_remote(vq->vdev))) {
+    if (unlikely(check_virtio_device_remote(vq->vdev))) { // local qemu in
         cb1 = remote_virtio_queue_host_notifier_read;
         cb2 = remote_virtio_queue_host_notifier_aio_poll_ready;
         remote_virtio_register_aio(vq->vdev);

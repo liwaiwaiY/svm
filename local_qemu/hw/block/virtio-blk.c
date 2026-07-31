@@ -1045,7 +1045,7 @@ static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBlock *s = (VirtIOBlock *)vdev;
 
-    // cmsvm: need to pass this pld logic
+    // cmsvm: remote stub will not be kicked, should skip
     if (!virtqueue_get_remote_ctx(vq) && !s->ioeventfd_disabled && !s->ioeventfd_started) {
         /* Some guests kick before setting VIRTIO_CONFIG_S_DRIVER_OK so start
          * ioeventfd here instead of waiting for .set_status().

@@ -1246,14 +1246,14 @@ static void remote_virtio_queue_notify_vq(VirtQueue *vq)
     //              virtio_get_queue_index(vq), virtqueue_get_vdev_id(vq));
     if (virtqueue_get_vring_desc(vq)) {
         VirtIODevice *vdev = virtqueue_get_vdev(vq);
-        int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
+        int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id)); // a TCP socket
 
         if (unlikely(vdev->broken)) {
             return;
         }
 
         // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
+        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id); // each vdev has an uneque ctx
 
         if (qatomic_cmpxchg(&comm_ctx->used, false, true)) {
             // force_printf("[remote_virtio_qeueue_notify_vq] comm_ctx is using");
