@@ -1294,7 +1294,7 @@ void virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len)
 {
     // cmsvm
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx) { // remote stub in
         remote_stub_virtqueue_push(vq, elem, len);
         return;
     }

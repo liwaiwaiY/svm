@@ -360,7 +360,7 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
 {
     // force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
-    if (len == 0) {
+    if (elem->in_num == 0) {
         // force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
         goto free;
     }
@@ -377,8 +377,10 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     resp_header[1] = elem->index;
     resp_header[2] = len;
 
-    while (cnt < len)
+    while (cnt < len && sgs < elem->in_num)
         cnt += elem->in_sg[sgs++].iov_len;
+    if (sgs >= elem->in_num) // directly drop right now
+        return;
 
     iovec *resp_iov = g_new0(iovec, sgs + 1);
     resp_iov[0].iov_base = resp_header;
@@ -416,10 +418,10 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, uns
     g_free(resp_header);
     g_free(resp_iov);
 free:
-    for (int i = 0; i < elem->out_num&& !elem->out_sg[i].iov_base; i++) {
+    for (int i = 0; i < elem->out_num&& elem->out_sg[i].iov_base; i++) {
         g_free(elem->out_sg[i].iov_base);
     }
-    for (int i = 0; i < elem->in_num && !elem->in_sg[i].iov_base; i++) {
+    for (int i = 0; i < elem->in_num && elem->in_sg[i].iov_base; i++) {
         g_free(elem->in_sg[i].iov_base);
     }
 }
@@ -682,9 +684,9 @@ link_err:
     exit(0);
 data_err:
     // force_printf("[????]data error");
-    for (int i = 0; i < out_num && !out_sg[i].iov_base; i++)
+    for (int i = 0; i < out_num && out_sg[i].iov_base; i++)
         g_free(out_sg[i].iov_base);
-    for (int i = 0; i < in_num && !in_sg[i].iov_base; i++)
+    for (int i = 0; i < in_num && in_sg[i].iov_base; i++)
         g_free(in_sg[i].iov_base);
     g_free(out_sg);
     g_free(in_sg);
@@ -784,6 +786,7 @@ static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
     }
     // gsi_elems + gsi_ctxes
     if (g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id)) {
+        g_free(g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id));
         g_hash_table_remove(gsi_ctxes, DEVICE(vdev)->id);
     }
     // set_aio
@@ -1038,10 +1041,14 @@ static void* route_to_remote(void *opaque)
         //                  msg_sg + 1, elem->out_num);
 
         io_uring_wait_cqe(send_uring, &cqe);
+        if (cqe->res < 0)
+            return NULL; // exit first for wrong sending
         io_uring_cqe_seen(send_uring, cqe);
 
         if (cqe->flags & IORING_CQE_F_MORE) {
             io_uring_wait_cqe(send_uring, &cqe);
+            if (cqe->res < 0)
+                return NULL; // exit first for wrong sending
             io_uring_cqe_seen(send_uring, cqe);
         }
 
