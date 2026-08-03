@@ -2,7 +2,6 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-virtio.h"
-// #include "trace.h"
 #include "qemu/defer-call.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
@@ -22,7 +21,7 @@
 #include "system/iothread.h"
 #include "system/memory.h"
 #include "system/runstate.h"
-// #include "virtio-qmp.h"
+#include "qemu/aio.h"
 
 #include "standard-headers/linux/virtio_ids.h"
 #include "standard-headers/linux/vhost_types.h"
@@ -38,254 +37,13 @@
 #include "standard-headers/linux/virtio_vsock.h"
 #include "standard-headers/linux/virtio_spi.h"
 
-// cmsvm
-#include "hw/virtio-remote/virtio-remote.h"
 #include <sys/socket.h>
-#include <sys/uio.h>
-#include <poll.h>
-#include <liburing.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <stdatomic.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
-/*
-*  Transport Protocol:
-*  req (local->remote): [vq_nr(4B), elem_index(4B), out_len(4B), in_len(4B), out_sg_data...]
-*  resp (remote->local): [vq_nr(4B), elem_index(4B), data_len(4B), data...]
-*/
-
-#define IO_URING_DEPTH 32 // maximum concurrent reqs
-#define RING_SIZE (IO_URING_DEPTH * 4)
-
-// __attribute__((format(printf, 1, 2)))
-// void force_printf(const char *fmt, ...)
-// {
-//     va_list ap;
-//     va_start(ap, fmt);
-//     vprintf(fmt, ap);
-//     printf("\n");
-//     va_end(ap);
-//     fflush(stdout);
-// }
-
-// static void ensure_log_dir(const char *dir)
-// {
-//     g_mkdir_with_parents(dir, 0755);
-// }
-
-// static void log_hex_dump(const char *filepath, const char *prefix,
-//                          int seq, const uint8_t *data, int len)
-// {
-//     FILE *f = fopen(filepath, "a");
-//     if (!f) return;
-
-//     fprintf(f, "[%s #%d] len=%d:\n", prefix, seq, len);
-//     for (int off = 0; off < len; off += 32) {
-//         int n = len - off < 32 ? len - off : 32;
-//         for (int i = 0; i < n; i++)
-//             fprintf(f, "%02x ", data[off + i]);
-//         fprintf(f, "\n");
-//     }
-//     fflush(f);
-//     fclose(f);
-// }
-
-// static void log_hex_dump_iov(const char *filepath, const char *prefix,
-//                              int seq, iovec *iov, int iov_cnt)
-// {
-//     FILE *f = fopen(filepath, "a");
-//     int total = 0, i = 0, off = 0;
-//     if (!f) return;
-
-//     for (int k = 0; k < iov_cnt; k++)
-//         total += iov[k].iov_len;
-
-//     fprintf(f, "[%s #%d] iov_cnt=%d total_len=%d:\n", prefix, seq, iov_cnt, total);
-//     while (i < iov_cnt) {
-//         for (int col = 0; col < 32 && i < iov_cnt; col++) {
-//             uint8_t *p = (uint8_t *)iov[i].iov_base;
-//             fprintf(f, "%02x ", p[off]);
-//             off++;
-//             if (off >= (int)iov[i].iov_len) { i++; off = 0; }
-//         }
-//         fprintf(f, "\n");
-//     }
-//     fflush(f);
-//     fclose(f);
-// }
-
-// static atomic_int local_send_seq;
-// static atomic_int local_recv_seq;
-// static atomic_int remote_recv_seq;
-// static atomic_int remote_send_seq;
-
-#define LOCAL_LOG_DIR  "/home/waiai/SvmExp/local/svm/log"
-#define REMOTE_LOG_DIR "/home/waiai/SvmExp/remote/log"
-
-// static void log_init_local(void)
-// {
-//     ensure_log_dir(LOCAL_LOG_DIR);
-// }
-
-// static void log_init_remote(void)
-// {
-//     ensure_log_dir(REMOTE_LOG_DIR);
-// }
-
-/*
-*  format: <K:DEVICE(vdev)->id, V:int>
-*  local_qemu: a link head of sockets of each vq
-*  remote_stub: a socket of listening
-*/
-GHashTable *gsi_stubs = NULL;
-
-/*
-*  format: <K:DEVICE(vdev)->id, V:CommCTX*>
-*  local_qemu: a hash table of sent elements
-*  remote_qemu: none
-*/
-// 
-GHashTable *gsi_ctxes = NULL;
-
-/*
-*  format: <K:DEVICE(vdev)->id, V:Bool>
-*  local_qemu: aio list
-*  remote_stub: none
-*/
-GHashTable *set_aio = NULL;
-
-/*
-*  format: <K:DEVICE(vdev)->id, GINT_TO_POINTER(0)>
-*  local_qemu: remote devices list
-*  remote_stub: remote devices list
-*/
-GHashTable* ids = NULL;
-
-static struct io_uring send_uring_data;
-static struct io_uring *send_uring = &send_uring_data;
-
-static struct io_uring resp_uring_data;
-static struct io_uring *resp_uring = &resp_uring_data;
-
-/*
-*  decoupling I/O with strong ordering
-*/
-typedef struct CommCTX {
-    bool used;
-    bool sending;
-    bool recving;
-    int sent;
-    int recved;
-    int notified;
-    sem_t sem1;
-    sem_t sem2;
-    VirtQueueElement **ring;
-} CommCTX;
-
-bool check_virtio_device_remote(VirtIODevice *vdev)
-{
-    if (!gsi_stubs) // none remote devices
-        return false;
-
-    if (!DEVICE(vdev)->id) // no id
-        return false;
-
-    return g_hash_table_contains(ids, DEVICE(vdev)->id);
-}
-
-bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
-{
-    if (!set_aio)
-        return false;
-    return g_hash_table_contains(set_aio, DEVICE(vdev)->id);
-}
-
-void remote_virtio_register_aio(VirtIODevice *vdev)
-{
-    if (!set_aio)
-        set_aio = g_hash_table_new(g_str_hash, g_str_equal);
-    g_hash_table_insert(set_aio, DEVICE(vdev)->id, GINT_TO_POINTER(0));
-}
-
-static VirtQueue *lookup_vq(VirtIODevice *vdev, int vq_nr)
-{
-    if (vq_nr < 0 || vq_nr >= VIRTIO_QUEUE_MAX) {
-        return NULL;
-    }
-    return virtio_get_queue(vdev, vq_nr);
-}
-
-int remote_uring_init(bool remote_stub)
-{
-    if (gsi_stubs)
-        return 0;
-    // force_printf("[remote_uring_init] for %s", remote_stub ? "remote_stub" : "local_qemu");
-
-    gsi_stubs = g_hash_table_new(g_str_hash, g_str_equal);
-
-    if (!remote_stub) { // local_qemu
-        // log_init_local();
-        gsi_ctxes = g_hash_table_new(g_str_hash, g_str_equal);
-        int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
-        if (ret < 0) {
-            fprintf(stderr, "send_uring init failed\n");
-            return -1;
-        }
-        ret = io_uring_queue_init(IO_URING_DEPTH, resp_uring, 0);
-        if (ret < 0) {
-            fprintf(stderr, "resp_uring init failed\n");
-            io_uring_queue_exit(send_uring);
-            return -1;
-        }
-        
-    } else {
-        // log_init_remote();
-        int ret = io_uring_queue_init(IO_URING_DEPTH, send_uring, 0);
-        if (ret < 0) {
-            fprintf(stderr, "send_uring init failed\n");
-            return -1;
-        }
-        ret = io_uring_queue_init(IO_URING_DEPTH, resp_uring, 0);
-        if (ret < 0) {
-            fprintf(stderr, "resp_uring init failed\n");
-            io_uring_queue_exit(send_uring);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-
-static int seq = 0;
-
-void remote_register_id(Object *obj, const char *id, Error **errp)
-{
-    // force_printf("[remote_register_id] regiserint id");
-    if (!ids)
-        ids = g_hash_table_new(g_str_hash, g_str_equal);
-    if (g_hash_table_lookup(ids, id)) { // duplicate
-        error_setg(errp, "Duplicate device ID '%s'", id);
-        return;
-    } else if (id) {
-        DEVICE(obj)->id = g_strdup(id);
-        // force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
-    } else { // allocate one
-        DEVICE(obj)->id = g_strdup_printf("remote%d", seq++);
-        // force_printf("[remote_register_id] register id [%s]", DEVICE(obj)->id);
-    }
-    g_hash_table_insert(ids, DEVICE(obj)->id, GINT_TO_POINTER(0));
-}
-
-// socket reconnect
-static int reconnect_tcp_socket(int fd)
-{
-    // cmsvmTODO v2
-    return 0;
-}
-
-// enalbe socket aliveness in kernel. 55s maximum link down
-static int enable_tcp_keepalive(int fd)
+// enable socket keepalive in kernel, ~55s maximum link down detection
+static void enable_tcp_keepalive(int fd)
 {
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
@@ -295,178 +53,128 @@ static int enable_tcp_keepalive(int fd)
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof(keep_intvl));
     int keep_cnt = 5;
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof(keep_cnt));
+}
+
+// connection retry parameters for the remote stub
+#define CONNECT_RETRY_TIMES 3
+#define CONNECT_RETRY_DELAY_MS 500
+#define CONNECT_TIMEOUT_SEC 1
+
+// control-plane message magic exchanged during port negotiation
+#define LOCAL_NEGO_MAGIC 0x4c52434e /* "LRCN" */
+
+// write all bytes to fd, or -1 on error (retries EINTR)
+static int write_all(int fd, const void *buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, (const char *)buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (n == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        off += n;
+    }
     return 0;
 }
 
-static void *remote_stub_virtqueue_alloc_element(size_t sz, unsigned out_num, unsigned in_num)
+// read exactly len bytes from fd, or -1 on error / premature close
+static int read_all(int fd, void *buf, size_t len)
 {
-    VirtQueueElement *elem;
-    size_t in_addr_ofs = QEMU_ALIGN_UP(sz, __alignof__(elem->in_addr[0]));
-    size_t out_addr_ofs = in_addr_ofs + in_num * sizeof(elem->in_addr[0]);
-    size_t out_addr_end = out_addr_ofs + out_num * sizeof(elem->out_addr[0]);
-    size_t in_sg_ofs = QEMU_ALIGN_UP(out_addr_end, __alignof__(elem->in_sg[0]));
-    size_t out_sg_ofs = in_sg_ofs + in_num * sizeof(elem->in_sg[0]);
-    size_t out_sg_end = out_sg_ofs + out_num * sizeof(elem->out_sg[0]);
-
-    assert(sz >= sizeof(VirtQueueElement));
-    elem = g_malloc(out_sg_end);
-    // trace_virtqueue_alloc_element(elem, sz, in_num, out_num);
-    elem->out_num = out_num;
-    elem->in_num = in_num;
-    elem->in_addr = (void *)elem + in_addr_ofs;
-    elem->out_addr = (void *)elem + out_addr_ofs;
-    elem->in_sg = (void *)elem + in_sg_ofs;
-    elem->out_sg = (void *)elem + out_sg_ofs;
-    return elem;
-}
-
-// remote_ctx has to be existing
-bool remote_virtio_queue_empty(void *opaque)
-{
-    RemoteVQueueCtx *remote_ctx = (RemoteVQueueCtx *)opaque;
-    return remote_ctx->elem; // popped once from the ctx
-}
-
-void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
-{
-    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    if (ctx->elem) { // poped once
-        // force_printf("[remote_stub_virtqueue_pop] empty as poped once from ctx");
-        return NULL;
-    }
-
-    // int out_num = ctx->out_num, in_num = ctx->in_num;
-    int out_num = ctx->out_num, in_num = ctx->in_num;
-    VirtQueueElement *ret = remote_stub_virtqueue_alloc_element(sz, out_num, in_num);
-    ret->index = ctx->elem_index;
-    ret->ndescs = 1;
-    ret->in_order_filled = false;
-    ret->len = 0;
-    // out_addr and in_addr fields are filled to prevent escape
-    // need to handle in migration
-    for (int i = 0; i < out_num; i++) {
-        ret->out_addr[i] = 0;
-        ret->out_sg[i] = ctx->out_sg[i];
-    }
-    for (int i = 0; i < in_num; i++) {
-        ret->in_addr[i] = 0;
-        ret->in_sg[i] = ctx->in_sg[i];
-    }
-    // record element
-    ctx->elem = (void *)ret;
-    return ret;
-}
-
-void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len)
-{
-    // force_printf("[remote_stub_virtqueue_push] send resp for vdev %s", virtqueue_get_vdev_id(vq));
-    if (elem->in_num == 0) {
-        // force_printf("[remote_stub_virtqueue_push] len == 0, don't send");
-        goto free;
-    }
-
-    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    struct io_uring_sqe *sqe;
-    struct io_uring_cqe *cqe;
-    int sgs = 0, cnt = 0;
-
-    // [vq_nr, sent(elem->index), len] [data1] [data2] ... [data-len]
-    int *resp_header = g_new0(int, 3);
-
-    resp_header[0] = ctx->vq_nr;
-    resp_header[1] = elem->index;
-    resp_header[2] = len;
-
-    while (cnt < len && sgs < elem->in_num)
-        cnt += elem->in_sg[sgs++].iov_len;
-    if (sgs >= elem->in_num) // directly drop right now
-        return;
-
-    iovec *resp_iov = g_new0(iovec, sgs + 1);
-    resp_iov[0].iov_base = resp_header;
-    resp_iov[0].iov_len = sizeof(int) * 3;
-    memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
-    resp_iov[sgs - 1].iov_len -= (cnt - len);
-
-    struct msghdr msg = {
-        .msg_iov = resp_iov,
-        .msg_iovlen = sgs + 1,
-    };
-    // force_printf("[remote_stub_virtqueue_push] send resp at [vq_nr:%d, sent:%d, len: %d]",
-    //              resp_header[0], resp_header[1], resp_header[2]);
-
-    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND_HDR",
-    //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
-    //                  resp_iov, 1);
-    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-send.log", "SEND",
-    //                  atomic_fetch_add(&remote_send_seq, 1) + 1,
-    //                  resp_iov + 1, 1);
-
-    sqe = io_uring_get_sqe(send_uring);
-    io_uring_prep_sendmsg_zc(sqe, ctx->resp_fd, &msg, 0);
-    sqe->ioprio |= IORING_SEND_ZC_REPORT_USAGE;
-    io_uring_submit(send_uring);
-
-    io_uring_wait_cqe(send_uring, &cqe);
-    io_uring_cqe_seen(send_uring, cqe);
-
-    if (cqe->flags & IORING_CQE_F_MORE) {
-        io_uring_wait_cqe(send_uring, &cqe);
-        io_uring_cqe_seen(send_uring, cqe);
-    }
-
-    g_free(resp_header);
-    g_free(resp_iov);
-free:
-    for (int i = 0; i < elem->out_num&& elem->out_sg[i].iov_base; i++) {
-        g_free(elem->out_sg[i].iov_base);
-    }
-    for (int i = 0; i < elem->in_num && elem->in_sg[i].iov_base; i++) {
-        g_free(elem->in_sg[i].iov_base);
-    }
-}
-
-bool remote_virtio_notify_skip(VirtIODevice *vdev)
-{
-    int n;
-    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = read(fd, (char *)buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
         }
-        if (virtqueue_get_remote_ctx(virtio_get_queue(vdev, n))) {
-            // remote stub, should skip notify
-            return true;
+        if (n == 0) {
+            errno = ECONNRESET;
+            return -1;
+        }
+        off += n;
+    }
+    return 0;
+}
+
+/*
+ * Try to establish a TCP connection to addr with retries, bounding each
+ * attempt with SO_SNDTIMEO. If recreate is true, a fresh socket is created
+ * after each failed attempt (a failed connect() leaves the old fd unusable)
+ * and the fd is owned by this function; otherwise the caller's fd is reused
+ * as-is and left open on failure, so the caller keeps ownership.
+ * Returns 0 on success, -1 on failure (errp set, *fdp closed if recreate).
+ */
+static int connect_with_retry(int *fdp, const struct sockaddr_in *addr,
+                              bool recreate, Error **errp)
+{
+    int last_errno = 0;
+
+    for (int attempt = 0; attempt < CONNECT_RETRY_TIMES; attempt++) {
+        struct timeval tv = { .tv_sec = CONNECT_TIMEOUT_SEC };
+        setsockopt(*fdp, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        if (connect(*fdp, (struct sockaddr *)addr, sizeof(*addr)) == 0) {
+            return 0;
+        }
+        last_errno = errno;
+
+        if (attempt + 1 < CONNECT_RETRY_TIMES) {
+            if (recreate) {
+                close(*fdp);
+                *fdp = socket(AF_INET, SOCK_STREAM, 0);
+                if (*fdp < 0) {
+                    last_errno = errno;
+                    break;
+                }
+            }
+            g_usleep(CONNECT_RETRY_DELAY_MS * 1000);
         }
     }
-    return false;
+
+    if (recreate) {
+        close(*fdp);
+    }
+    char ipstr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr->sin_addr, ipstr, sizeof(ipstr));
+    error_setg_errno(errp, last_errno,
+                     "failed to connect to %s:%d after %d attempts",
+                     ipstr, ntohs(addr->sin_port), CONNECT_RETRY_TIMES);
+    return -1;
 }
 
-void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp)
+/*
+* called by local qemu in property setter ("remote-machine")
+* connect the control fd, then negotiate vq_nt TCP connections with the
+* remote stub over it; on success sockets[] holds vq_nt connected fds
+*/
+int local_connect_socket(const char *ip_port, int vq_nt, int *sockets, Error **errp)
 {
-    // force_printf("[init_remote_virtio_device_sockets] for vdev %s to connect %s", DEVICE(vdev)->id, ip_port);
-
-    // get ip and port
+    // parse ip and port
     char ip[64];
     int port;
     const char *at_pos = strchr(ip_port, '@');
     if (!at_pos) {
         error_setg(errp, "invalid ip_port format, expected ip@port");
-        goto err_option;
+        return;
     }
     size_t ip_len = at_pos - ip_port;
     if (ip_len >= sizeof(ip)) {
         error_setg(errp, "ip address too long");
-        goto err_option;
+        return;
     }
     memcpy(ip, ip_port, ip_len);
     ip[ip_len] = '\0';
     port = atoi(at_pos + 1);
-    // open a socket
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        error_setg_errno(errp, errno, "failed to create socket");
-        goto err_sock;
-    }
+
     // configure ip and port
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -474,788 +182,309 @@ void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, 
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) {
         error_setg(errp, "invalid ip address: %s", ip);
-        goto err_sock2;
+        return -1;
     }
-    /* we assume that the remote_stub is already initialized before local_qemu starts, therefore
-    *  directly connecting is reasonable.
-    */
-    // todocmsvm: do we need retry?
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        error_setg_errno(errp, errno, "failed to connect to %s:%d", ip, port);
-        goto err_connect;
+
+    /*
+     * The remote stub is assumed to be up before local qemu starts, but it
+     * may take a moment to bind/listen, so retry a few times. Each attempt is
+     * bounded by SO_SNDTIMEO, otherwise an unreachable host would stall the
+     * main thread for the whole TCP SYN retry period (minutes).
+     */
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "failed to create socket");
+        return -1;
     }
-    // long-term usage (kernel automatically send hearbeats)
-    enable_tcp_keepalive(fd);
-    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
-    CommCTX *comm_ctx = g_new0(CommCTX, 1);
-    g_hash_table_insert(gsi_ctxes, (gpointer)DEVICE(vdev)->id, comm_ctx);
+    /* control connection; a failed connect() leaves the fd unusable, so let
+     * the helper recreate the socket on each retry */
+    if (connect_with_retry(&fd, &addr, true, errp) < 0) {
+        return -1;
+    }
 
-    return;
+    /*
+     * One TCP connection per vq, ports negotiated over the control fd:
+     * 1. bind vq_nt sockets to free local ports (kernel picks via port 0),
+     *    then send these ports to the remote stub.
+     * 2. wait for the stub's reply carrying the ports it allocated on its
+     *    side, then connect() each socket and hand them out.
+     */
+    int last_errno = 0;
+    if (vq_nt > VIRTIO_QUEUE_MAX) {
+        last_errno = EINVAL;
+        goto err;
+    }
 
-err_connect:
-    // force_printf("failed to connect to %s:%d", ip, port);
-err_sock2:
+    uint16_t src_ports[VIRTIO_QUEUE_MAX];
+    uint16_t dst_ports[VIRTIO_QUEUE_MAX];
+    int sock_count = 0;
+
+    /* 1. ask the local kernel for vq_nt free source ports */
+    for (int i = 0; i < vq_nt; i++) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) {
+            last_errno = errno;
+            goto neg_fail;
+        }
+        struct sockaddr_in sin = { 0 };
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = htonl(INADDR_ANY);
+        sin.sin_port = 0; /* kernel picks a free port */
+        if (bind(s, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
+            last_errno = errno;
+            close(s);
+            goto neg_fail;
+        }
+        socklen_t slen = sizeof(sin);
+        if (getsockname(s, (struct sockaddr *)&sin, &slen) < 0) {
+            last_errno = errno;
+            close(s);
+            goto neg_fail;
+        }
+        sockets[sock_count++] = s;
+        src_ports[i] = ntohs(sin.sin_port);
+    }
+
+    /* 2. send the local ports to the remote stub over the control fd */
+    char msg[8 + VIRTIO_QUEUE_MAX * 2];
+    uint32_t magic = htonl(LOCAL_NEGO_MAGIC);
+    uint32_t cnt = htonl(vq_nt);
+    memcpy(msg, &magic, 4);
+    memcpy(msg + 4, &cnt, 4);
+    for (int i = 0; i < vq_nt; i++) {
+        uint16_t p = htons(src_ports[i]);
+        memcpy(msg + 8 + i * 2, &p, 2);
+    }
+    if (write_all(fd, msg, 8 + vq_nt * 2) < 0) {
+        last_errno = errno;
+        goto neg_fail;
+    }
+
+    /* 3. receive the ports allocated by the remote stub */
+    if (read_all(fd, msg, 8) < 0) {
+        last_errno = errno;
+        goto neg_fail;
+    }
+    memcpy(&magic, msg, 4);
+    memcpy(&cnt, msg + 4, 4);
+    if (ntohl(magic) != LOCAL_NEGO_MAGIC || ntohl(cnt) != vq_nt) {
+        last_errno = EPROTO;
+        goto neg_fail;
+    }
+    if (read_all(fd, msg, vq_nt * 2) < 0) {
+        last_errno = errno;
+        goto neg_fail;
+    }
+    for (int i = 0; i < vq_nt; i++) {
+        uint16_t p;
+        memcpy(&p, msg + i * 2, 2);
+        dst_ports[i] = ntohs(p);
+    }
+
+    return fd;
+
+neg_fail:
+    /* the control connection is unusable after a failed negotiation */
     close(fd);
-err_option:
-err_sock:
-    return;
+    for (int i = 0; i < sock_count; i++) {
+        close(sockets[i]);
+        sockets[i] = -1;
+    }
+    /* fall through to err */
+
+err:
+    error_setg_errno(errp, last_errno,
+                     "failed to set up %d remote connections to %s:%d",
+                     vq_nt, ip, port);
+    return -1;
 }
 
-// todocmsvm: out_buf and in_buf will be too large for one buffer?
 /*
-*  this function will be called when remote_stub recieves an elem as [vq_nr, index, out_len, in_len, out_data]
-*  it needs to recieve the correct data, prepare remote_ctx, call vq->handle_output, and send back resp
-*  resp as [vq_nr, index, in_len, in_data] (in_len is the true len)
-*/
-static void remote_stub_read_handler(void *opaque)
+ * called by local qemu: connect() an already-created vq socket (whose source
+ * port was pinned during negotiation) to the remote stub. The fd is reused
+ * across retries because recreating it would change the source port.
+ */
+bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
 {
-    VirtIODevice *vdev = opaque;
-    // force_printf("[remote_stub_read_handler] for vdev %s", DEVICE(vdev)->id);
-
-    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
-    if (fd < 0) {
-        return;
+    if (connect_with_retry(&socket, addr, false, errp) < 0) {
+        return false;
     }
-
-    struct io_uring_sqe *sqe;
-    struct io_uring_cqe *cqe;
-    uint8_t req_header[4 * sizeof(int)];
-    iovec *out_sg, *in_sg;
-    int read_cnt, vq_nr, sent, out_num, in_num;
-
-    if (!resp_uring) {
-        return;
-    }
-
-    // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
-
-    read_cnt = 0;
-    while (read_cnt < (int)sizeof(req_header)) {
-        sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, req_header + read_cnt,
-                           sizeof(req_header) - read_cnt, 0);
-        io_uring_submit(resp_uring);
-        io_uring_wait_cqe(resp_uring, &cqe);
-        if (cqe->res <= 0) {
-            io_uring_cqe_seen(resp_uring, cqe);
-            goto link_err;
-        }
-        read_cnt += cqe->res;
-        io_uring_cqe_seen(resp_uring, cqe);
-    }
-
-    // log_hex_dump(REMOTE_LOG_DIR "/remote-recv.log", "RECV_HDR",
-    //              atomic_fetch_add(&remote_recv_seq, 1) + 1,
-    //              req_header, sizeof(req_header));
-
-    vq_nr  = req_header[0] | (req_header[1] << 8) |
-             (req_header[2] << 16) | (req_header[3] << 24);
-    sent  = req_header[4] | (req_header[5] << 8) |
-             (req_header[6] << 16) | (req_header[7] << 24);
-    out_num = req_header[8] | (req_header[9] << 8) |
-              (req_header[10] << 16) | (req_header[11] << 24);
-    in_num  = req_header[12] | (req_header[13] << 8) |
-              (req_header[14] << 16) | (req_header[15] << 24);
-    // force_printf("[remote_stub_read_handler] recv header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-    //              vq_nr, sent, out_num, in_num);
-
-    out_sg = g_new0(iovec, out_num);
-    in_sg = g_new0(iovec, in_num);
-    uint8_t tmp[sizeof(int)];
-    
-    for (int i = 0; i < out_num; i++) {
-        sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, &tmp, sizeof(int), MSG_WAITALL);
-        io_uring_submit(resp_uring);
-        io_uring_wait_cqe(resp_uring, &cqe);
-        if (cqe->res <= 0) {
-            io_uring_cqe_seen(resp_uring, cqe);
-            goto data_err;
-        }
-        out_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
-        out_sg[i].iov_base = g_new(char, out_sg[i].iov_len);
-        // force_printf("[???? out sg] id [%d] len [%ld]", i, out_sg[i].iov_len);
-        io_uring_cqe_seen(resp_uring, cqe);
-    }
-
-    for (int i = 0; i < in_num; i++) {
-        sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, &tmp, sizeof(int), MSG_WAITALL);
-        io_uring_submit(resp_uring);
-        io_uring_wait_cqe(resp_uring, &cqe);
-        if (cqe->res <= 0) {
-            io_uring_cqe_seen(resp_uring, cqe);
-            goto data_err;
-        }
-        in_sg[i].iov_len = tmp[0] | (tmp[1] << 8) | (tmp[2] << 16) | (tmp[3] << 24);
-        in_sg[i].iov_base = g_new(char, in_sg[i].iov_len);
-        // force_printf("[???? in sg] id [%d] len [%ld]", i, in_sg[i].iov_len);
-        io_uring_cqe_seen(resp_uring, cqe);
-    }
-
-    for (int i = 0; i < out_num; i++) { // read out datas
-        sqe = io_uring_get_sqe(resp_uring);
-        io_uring_prep_recv(sqe, fd, out_sg[i].iov_base,
-                           out_sg[i].iov_len, MSG_WAITALL);
-        io_uring_submit(resp_uring);
-        io_uring_wait_cqe(resp_uring, &cqe);
-        if (cqe->res <= 0) {
-            io_uring_cqe_seen(resp_uring, cqe);
-            goto data_err;
-        }
-        io_uring_cqe_seen(resp_uring, cqe);
-    }
-
-    // log_hex_dump_iov(REMOTE_LOG_DIR "/remote-recv.log", "RECV",
-    //                  atomic_fetch_add(&remote_recv_seq, 1) + 1,
-    //                  out_sg, out_num);
-
-    VirtQueue *vq = lookup_vq(vdev, vq_nr);
-    if (!vq) {
-        // force_printf("[remote_stub_read_handler] cannot found vq_nr:%d, vdev:%s",
-        //              vq_nr, DEVICE(vdev)->id);
-        goto data_err;
-    }
-    // force_printf("[remote_stub_read_handler] found vq");
-
-    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    if (!ctx) {
-        // force_printf("[remote_stub_read_handler] unexpected empty remote_ctx");
-        exit(0);
-    }
-    if (!ctx->resp_fd) { // first called
-        ctx->resp_fd = fd;
-        ctx->vq_nr = vq_nr;
-    }
-
-    // elem-specific
-    ctx->elem_index = sent;
-    ctx->out_num = out_num;
-    ctx->in_num = in_num;
-    ctx->out_sg = out_sg;
-    ctx->in_sg = in_sg;
-
-    /*
-    *  basic handle_output framework:
-    *  while (elem = virtqueue_pop(vq, sizeof(VirtQueueElement))) {
-    *      read(elem->out_sg);
-    *      ....
-    *      write(elem->in_sg);
-    *  }
-    *  virtqueue_push(...);    or     virtqueue_fill(); virtqueue_flush();
-    *  g_free(elem);
-    */
-
-    /*
-    *  top-bottom half framework:
-    *  notifier -> vq->handle_output (top half): forbidden notification and qemu_bh_schedule();
-    *           +> reoute_to_remote --> remote_stub_read_handler
-    *                                           -> remain elem and free in push
-    */
-
-    /*
-    *  asynchronous IO framework:
-    *  handle_ouput: defer_call(...) -> return
-    *  backend: call push later
-    */
-
-    // force_printf("[remote_stub_read_handler] call handle_output at[%p]", virtqueue_get_handle_output(vq));
-    virtqueue_call_handle_output(vq);
-    // force_printf("[remote_stub_read_handler] call bh to handle");
-    aio_bh_poll(qemu_get_aio_context());
-
-    // reset remote_ctx
-    ctx->elem = NULL;
-    ctx->elem_index = 0;
-    ctx->out_num = 0;
-    ctx->in_num = 0;
-    g_free(out_sg);
-    g_free(in_sg);
-    ctx->out_sg = NULL;
-    ctx->in_sg = NULL;
-
-    // force_printf("[remote_stub_read_handler] return");
-    return;
-
-link_err:
-    qemu_set_fd_handler(fd, NULL, NULL, NULL);
-    close(fd);
-    g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
-    exit(0);
-data_err:
-    // force_printf("[????]data error");
-    for (int i = 0; i < out_num && out_sg[i].iov_base; i++)
-        g_free(out_sg[i].iov_base);
-    for (int i = 0; i < in_num && in_sg[i].iov_base; i++)
-        g_free(in_sg[i].iov_base);
-    g_free(out_sg);
-    g_free(in_sg);
-    exit(0);
+    enable_tcp_keepalive(socket);
+    return true;
 }
 
-static void remote_stub_accept_handler(void *opaque)
+void local_response_handler(void *opaque)
 {
-    // force_printf("[remote_stub_accept_handler] Begin to connect ...");
 
-    VirtIODevice *vdev = opaque;
-    int listen_fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
-
-    if (listen_fd < 0) {
-        return;
-    }
-
-    int fd = accept(listen_fd, NULL, NULL);
-    if (fd < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            error_report("remote stub accept failed for vdev %s: %s",
-                         DEVICE(vdev)->id, strerror(errno));
-        }
-        return;
-    }
-
-    qemu_set_fd_handler(listen_fd, NULL, NULL, NULL);
-    g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
-    close(listen_fd);
-    enable_tcp_keepalive(fd);
-    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(fd));
-
-    qemu_set_fd_handler(fd, remote_stub_read_handler, NULL, vdev);
-    // force_printf("connected for dev %s", DEVICE(vdev)->id);
 }
 
-void init_remote_stub_socket(VirtIODevice *vdev, const char *str_port, Error **errp)
+/*
+ * called by remote stub: parse ip@port, create a listening socket and return
+ * its fd. The actual accept() is done asynchronously in remote_accept_handler
+ * once the fd becomes readable (i.e. local qemu connects).
+ */
+int remote_accept(const char *ip_port, Error **errp)
 {
-    // force_printf("[init_remote_stub_socket] for vdev %s to listen in port %s", DEVICE(vdev)->id, str_port);
+    // parse "ip@port"
+    char ip[64];
+    int port;
+    const char *at_pos = strchr(ip_port, '@');
+    if (!at_pos) {
+        error_setg(errp, "invalid ip_port format, expected ip@port");
+        return -1;
+    }
+    size_t ip_len = at_pos - ip_port;
+    if (ip_len >= sizeof(ip)) {
+        error_setg(errp, "ip address too long");
+        return -1;
+    }
+    memcpy(ip, ip_port, ip_len);
+    ip[ip_len] = '\0';
+    port = atoi(at_pos + 1);
 
-    int port = atoi(str_port);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         error_setg_errno(errp, errno, "failed to create listen socket");
-        return;
+        return -1;
     }
-
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        error_setg_errno(errp, errno, "failed to bind listen socket port %d", port);
+        error_setg_errno(errp, errno, "failed to bind %s:%d", ip, port);
         close(listen_fd);
-        return;
+        return -1;
     }
-
-    if (listen(listen_fd, 1) < 0) {
-        error_setg_errno(errp, errno, "failed to listen on socket");
+    if (listen(listen_fd, 8) < 0) {
+        error_setg_errno(errp, errno, "failed to listen on %s:%d", ip, port);
         close(listen_fd);
-        return;
+        return -1;
     }
-
-    int flags = fcntl(listen_fd, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
-    }
-
-    // tag vq is a remote_stub
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        RemoteVQueueCtx *ctx = g_new0(RemoteVQueueCtx, 1);
-        virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), ctx);
-        // force_printf("[init_remote_stub_socket] set remote ctx at [%p] for vq [%d]", ctx, n);
-    }
-
-    g_hash_table_insert(gsi_stubs, DEVICE(vdev)->id, GUINT_TO_POINTER(listen_fd));
-    /*
-    *  we think it is okay to put the listen resp in main-loop, as the local_qemu can only
-    *  connect server after remote_stub is started.
-    */
-    qemu_set_fd_handler(listen_fd, remote_stub_accept_handler, NULL, vdev);
+    return listen_fd;
 }
 
-static void remote_device_clean_up_hash_table(VirtIODevice *vdev)
+/*
+ * aio fd handler on the stub side: runs on the iothread when the listen fd
+ * becomes readable. Accepts the control connection from local qemu, then
+ * negotiates the per-vq ports with it (message format aligned with
+ * local_connect_socket), finally accepts and registers the vq connections.
+ *
+ * Note: this runs once per device during initialization, so the blocking
+ * reads/accepts here are acceptable; the data path itself stays async.
+ */
+void remote_accept_handler(void *opaque)
 {
-    // gsi_stubs
-    if (g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id)) {
-        g_hash_table_remove(gsi_stubs, DEVICE(vdev)->id);
-    }
-    // gsi_elems + gsi_ctxes
-    if (g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id)) {
-        g_free(g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id));
-        g_hash_table_remove(gsi_ctxes, DEVICE(vdev)->id);
-    }
-    // set_aio
-    if (set_aio && g_hash_table_contains(set_aio, DEVICE(vdev)->id))
-        g_hash_table_remove(set_aio, DEVICE(vdev)->id);
-}
+    RemoteAccept *sctx = opaque;
+    int vq_listen[VIRTIO_QUEUE_MAX];
+    int vq_nt = 0;
+    int ctl_fd = -1;
 
-static void close_remote_virtio_device_sockets(VirtIODevice *vdev)
-{
-    int fd = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
-    if (fd >= 0) {
-        qemu_set_fd_handler(fd, NULL, NULL, NULL);
-        close(fd);
+    for (int i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        vq_listen[i] = -1;
     }
 
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        RemoteVQueueCtx *remote_ctx = virtqueue_get_remote_ctx(virtio_get_queue(vdev, n));
-        if (remote_ctx) {
-            g_free(remote_ctx);
-            virtqueue_set_remote_ctx(virtio_get_queue(vdev, n), NULL);
-        }
-    }
-}
-
-typedef struct ListenerParam {
-    VirtIODevice *vdev;
-    VirtQueue *vq;
-    int stub;
-    CommCTX *comm_ctx;
-} ListenerParam;
-
-static void* resp_listener(void *opaque)
-{
-    ListenerParam *param = (ListenerParam *)opaque;
-    VirtIODevice *vdev = param->vdev;
-    VirtQueue *vq = param->vq;
-    int stub = param->stub;
-    CommCTX *comm_ctx = param->comm_ctx;
-    g_free(opaque);
-    struct io_uring_sqe *sqe;
-    struct io_uring_cqe *cqe;
-    uint8_t resp_header[3 * sizeof(int)];
-    int vq_nr, sent, len, tmp_recved;
-    int read_cnt, phase; // WARN: phase is not reliable code
-    VirtQueueElement *elem;
-    GHashTable *mapping = g_hash_table_new(g_direct_hash, g_direct_equal);
-
-    // force_printf("[resp_listener] to listener resps for vdev %s", DEVICE(vdev)->id);
-
-    while (true) {
-listen_begin:
-        phase = 0;
-
-        while (qatomic_read(&comm_ctx->sending) && (qatomic_read(&comm_ctx->recved) >= qatomic_read(&comm_ctx->sent)))
-            sem_wait(&comm_ctx->sem1);
-        if (!qatomic_read(&comm_ctx->sending) && (qatomic_read(&comm_ctx->recved) >= qatomic_read(&comm_ctx->sent)))
-            break;
-
-        tmp_recved = qatomic_read(&comm_ctx->recved);
-        elem = comm_ctx->ring[tmp_recved % RING_SIZE];
-        if (elem->in_num == 0) {
-            elem->len = 0;
-            // force_printf("[resp_listener] skip one elem at [%p]\n", elem);
-            goto done;
-        }
-
-        // [vq_nr, sent, len] [data1] [data2] ... [data-len]
-        // force_printf("[resp_listener] recv a resp, begin to read header");
-        read_cnt = 0;
-listen_header:
-        phase = 1;
-        while (read_cnt < (int)sizeof(resp_header)) {
-            sqe = io_uring_get_sqe(resp_uring);
-            io_uring_prep_recv(sqe, stub, resp_header + read_cnt,
-                               sizeof(resp_header) - read_cnt, 0);
-            io_uring_submit(resp_uring);
-            io_uring_wait_cqe(resp_uring, &cqe);
-            if (cqe->res <= 0) {
-                io_uring_cqe_seen(resp_uring, cqe);
-                goto link_err;
-            }
-            read_cnt += cqe->res;
-            io_uring_cqe_seen(resp_uring, cqe);
-        }
-        // log_hex_dump(LOCAL_LOG_DIR "/local-recv.log", "RECV_HDR",
-        //              atomic_fetch_add(&local_recv_seq, 1) + 1,
-        //              resp_header, sizeof(resp_header));
-        vq_nr = resp_header[0] | (resp_header[1] << 8) |
-                (resp_header[2] << 16) | (resp_header[3] << 24);
-        sent = resp_header[4] | (resp_header[5] << 8) |
-                (resp_header[6] << 16) | (resp_header[7] << 24);
-        len   = resp_header[8] | (resp_header[9] << 8) |
-                (resp_header[10] << 16) | (resp_header[11] << 24);
-
-        // force_printf("[resp_listener] recv header [vq_nr:%d, sent:%d, len:%d]",
-        //              vq_nr, sent, len);
-        // switched
-        while (g_hash_table_contains(mapping, GINT_TO_POINTER(sent))) {
-            int tmp = GPOINTER_TO_INT(g_hash_table_lookup(mapping, GINT_TO_POINTER(sent)));
-            g_hash_table_remove(mapping, GINT_TO_POINTER(sent));
-            // force_printf("[resp_listener] nested remapping: [sent:%d] -> [tmp:%d]", sent, tmp);
-            sent = tmp;
-        }
-        // force_printf("[resp_listener] done nested remapping at [sent:%d]", sent);
-        elem = comm_ctx->ring[sent % RING_SIZE];
-        // force_printf("[resp_listener] fetch elem at [sent:%d,addr:%p]",
-        //              sent, elem);
-
-        vq = lookup_vq(vdev, vq_nr);
-        if (!vq) {
-            // force_printf("[resp_listener] vq [%d] cannot found.", vq_nr);
-            goto elem_err;
-        }
-
-listen_data:
-        read_cnt = 0;
-        for (int i = 0; i < elem->in_num && read_cnt < len; i++) {
-            sqe = io_uring_get_sqe(resp_uring);
-            io_uring_prep_recv(sqe, stub, elem->in_sg[i].iov_base,
-                               MIN(elem->in_sg[i].iov_len, len - read_cnt),
-                               MSG_WAITALL);
-            io_uring_submit(resp_uring);
-            io_uring_wait_cqe(resp_uring, &cqe);
-            if (cqe->res <= 0) {
-                io_uring_cqe_seen(resp_uring, cqe);
-                goto link_err;
-            }
-            // read_cnt += elem->in_sg[i].iov_len;
-            read_cnt += cqe->res;
-            io_uring_cqe_seen(resp_uring, cqe);
-        }
-
-        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-recv.log", "RECV",
-        //                  atomic_fetch_add(&local_recv_seq, 1) + 1,
-        //                  elem->in_sg, elem->in_num);
-
-        elem->len = len;
-        // switch offset [sent] to recv
-        if (sent != tmp_recved) { // sent != rcved
-            VirtQueueElement *tmp = comm_ctx->ring[sent % RING_SIZE];
-            comm_ctx->ring[sent % RING_SIZE] = comm_ctx->ring[tmp_recved % RING_SIZE];
-            comm_ctx->ring[tmp_recved % RING_SIZE] = tmp;
-            g_hash_table_insert(mapping, GINT_TO_POINTER(tmp_recved), GINT_TO_POINTER(sent));
-            // force_printf("[resp_listener] elem is remmapped: tmp_recved[%d] ->  sent[%d]",
-            //              tmp_recved, sent);
-        }
-
-done:
-        // force_printf("[resp_listener] push elem at [%p] with sent [%d]", elem, elem->sent);
-        virtqueue_push(vq, elem, elem->len);
-        qatomic_fetch_inc(&comm_ctx->recved);
-        sem_post(&comm_ctx->sem2);
+    /* 1. accept the control connection from local qemu */
+    ctl_fd = accept(sctx->listen_fd, NULL, NULL);
+    if (ctl_fd < 0) {
+        error_report("remote stub: accept control connection failed: %s",
+                     strerror(errno));
+        goto fail;
     }
 
-    // force_printf("[resp_listener] return");
-    g_hash_table_destroy(mapping);
-    qatomic_set(&comm_ctx->recving, false);
-    sem_post(&comm_ctx->sem2);
-    return NULL;
-
-link_err:
-    if (!reconnect_tcp_socket(stub)) {
-        // force_printf("[resp_listener] reconnection error");
-        exit(0);
+    /* 2. read local's negotiation message: [magic:4][vq_nt:4][src_port:2*vq_nt] */
+    char msg[8 + VIRTIO_QUEUE_MAX * 2];
+    if (read_all(ctl_fd, msg, 8) < 0) {
+        goto fail;
     }
-    switch (phase) {
-    case 0:
-        goto listen_begin;
-    case 1:
-        goto listen_header;
-    case 2:
-        goto listen_data;
-    default:
-        return NULL;
+    uint32_t magic;
+    uint32_t cnt;
+    memcpy(&magic, msg, 4);
+    memcpy(&cnt, msg + 4, 4);
+    magic = ntohl(magic);
+    cnt = ntohl(cnt);
+    if (magic != LOCAL_NEGO_MAGIC || cnt == 0 || cnt > VIRTIO_QUEUE_MAX) {
+        error_report("remote stub: bad negotiation header (magic %x, vq %u)",
+                     magic, cnt);
+        goto fail;
     }
-elem_err:
-    return NULL;
-}
+    vq_nt = cnt;
+    if (read_all(ctl_fd, msg, vq_nt * 2) < 0) {
+        goto fail;
+    }
+    /* the source ports are kept for identity check if needed later */
 
-typedef struct SenderParam {
-    VirtQueue *vq;
-    int stub;
-    CommCTX *comm_ctx;
-} SenderParam;
-
-static void* route_to_remote(void *opaque)
-{
-    SenderParam *param = (SenderParam*) opaque;
-    VirtQueue *vq = param->vq;
-    int stub = param->stub;
-    CommCTX *comm_ctx = param->comm_ctx;
-    g_free(opaque);
-    VirtQueueElement *elem;
-    struct io_uring_sqe *sqe;
-    struct io_uring_cqe *cqe;
-    int vq_nr = virtio_get_queue_index(vq);
-
-    // force_printf("[route_to_remote] for vdev %s", virtqueue_get_vdev_id(vq));
-
-    while ((elem = virtqueue_pop(vq, sizeof(VirtQueueElement)))) {
-        // while (qatomic_read(&comm_ctx->sent) > qatomic_read(&comm_ctx->notified) + RING_SIZE)
-        //     sem_wait(&comm_ctx->sem3);
-
-        // send data as [vq_nr, index, out_len, in_len, out_data]
-        iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
-        int tmp_sent = qatomic_read(&comm_ctx->sent);
-        // directly write into ring
-        comm_ctx->ring[tmp_sent % RING_SIZE] = elem;
-        qatomic_fetch_inc(&comm_ctx->sent);
-
-        // [vq_nr, sent, out_num, in_num] [out1_len, out2_len, ..., in1_len, in2_len, ...] [out_data1] [out_data2]
-
-        int *header = g_new0(int, 4);
-        header[0] = vq_nr;
-        header[1] = tmp_sent;
-        header[2] = elem->out_num;
-        header[3] = elem->in_num;
-        int *lens = g_new0(int, header[2] + header[3]);
-        for (int i = 0; i < elem->out_num; i++)
-            lens[i] = elem->out_sg[i].iov_len;
-        for (int i = 0; i < elem->in_num; i++)
-            lens[i + elem->out_num] = elem->in_sg[i].iov_len;
-        msg_sg[0].iov_base = header;
-        msg_sg[0].iov_len = sizeof(int) * 4;
-        msg_sg[1].iov_base = lens;
-        msg_sg[1].iov_len = sizeof(int) * (header[2] + header[3]);
-        memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
-        struct msghdr msg = {
-            .msg_iov = msg_sg,
-            .msg_iovlen = elem->out_num + 2,
-        };
-        sqe = io_uring_get_sqe(send_uring);
-        io_uring_prep_sendmsg_zc(sqe, stub, &msg, 0);
-        io_uring_sqe_set_data(sqe, msg_sg[0].iov_base);
-        io_uring_submit(send_uring);
-
-        // force_printf("[route_to_remote] sent header [vq_nr:%d, sent:%d, out_num:%d, in_num:%d]",
-        //              header[0], header[1], header[2], header[3]);
-        // for (int i = 0; i < header[2]; i++)
-        //     force_printf("[???? out_sg] len [%d] [%d]", i, lens[i]);
-        // for (int i = 0; i < header[3]; i++)
-        //     force_printf("[?!!! in sg]  len [%d] [%d]", i + header[2], lens[i + header[2]]);
-
-        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND_HDR",
-        //                  atomic_fetch_add(&local_send_seq, 1) + 1,
-        //                  msg_sg, 1);
-        // log_hex_dump_iov(LOCAL_LOG_DIR "/local-send.log", "SEND",
-        //                  atomic_fetch_add(&local_send_seq, 1) + 1,
-        //                  msg_sg + 1, elem->out_num);
-
-        io_uring_wait_cqe(send_uring, &cqe);
-        if (cqe->res < 0)
-            return NULL; // exit first for wrong sending
-        io_uring_cqe_seen(send_uring, cqe);
-
-        if (cqe->flags & IORING_CQE_F_MORE) {
-            io_uring_wait_cqe(send_uring, &cqe);
-            if (cqe->res < 0)
-                return NULL; // exit first for wrong sending
-            io_uring_cqe_seen(send_uring, cqe);
+    /* 3. allocate vq_nt listening ports on the stub side, reply to local */
+    int opt = 1;
+    uint16_t dst_ports[VIRTIO_QUEUE_MAX];
+    for (int i = 0; i < vq_nt; i++) {
+        struct sockaddr_in vaddr;
+        memset(&vaddr, 0, sizeof(vaddr));
+        vaddr.sin_family = AF_INET;
+        vaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        vaddr.sin_port = 0; /* kernel picks a free port */
+        vq_listen[i] = socket(AF_INET, SOCK_STREAM, 0);
+        if (vq_listen[i] < 0 ||
+            setsockopt(vq_listen[i], SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0 ||
+            bind(vq_listen[i], (struct sockaddr *)&vaddr, sizeof(vaddr)) < 0 ||
+            listen(vq_listen[i], 1) < 0) {
+            error_report("remote stub: allocate vq listen socket failed: %s",
+                         strerror(errno));
+            goto fail;
         }
-
-        g_free(lens);
-        g_free(header);
-        g_free(msg_sg);
-
-        // force_printf("[route_to_remote] sent success");
-
-        // neglect full first
-        // force_printf("[route_to_remote] send elem at offset [%d] for vq [%d]", header[1], header[0]);
-        
-        // force_printf("[route_to_remote] comm_ctx->sent turns to be [%d]", qatomic_read(&comm_ctx->sent));
-        sem_post(&comm_ctx->sem1);
+        socklen_t slen = sizeof(vaddr);
+        if (getsockname(vq_listen[i], (struct sockaddr *)&vaddr, &slen) < 0) {
+            error_report("remote stub: getsockname failed: %s", strerror(errno));
+            goto fail;
+        }
+        dst_ports[i] = ntohs(vaddr.sin_port);
     }
 
-    qatomic_set(&comm_ctx->sending, false);
-    sem_post(&comm_ctx->sem1);
+    uint32_t rep_magic = htonl(LOCAL_NEGO_MAGIC);
+    uint32_t rep_cnt = htonl(vq_nt);
+    memcpy(msg, &rep_magic, 4);
+    memcpy(msg + 4, &rep_cnt, 4);
+    for (int i = 0; i < vq_nt; i++) {
+        uint16_t p = htons(dst_ports[i]);
+        memcpy(msg + 8 + i * 2, &p, 2);
+    }
+    if (write_all(ctl_fd, msg, 8 + vq_nt * 2) < 0) {
+        goto fail;
+    }
 
-    return NULL;
-}
-
-static void remote_virtio_queue_notify_vq(VirtQueue *vq)
-{
-    // force_printf("[remote_virtio_queue_notify_vq] vq[%d] of vdev[%s] has been notified",
-    //              virtio_get_queue_index(vq), virtqueue_get_vdev_id(vq));
-    if (virtqueue_get_vring_desc(vq)) {
-        VirtIODevice *vdev = virtqueue_get_vdev(vq);
-        int stub = GPOINTER_TO_UINT(g_hash_table_lookup(gsi_stubs, DEVICE(vdev)->id));
-
-        if (unlikely(vdev->broken)) {
-            return;
+    /* 4. accept the vq connections from local qemu and register them */
+    for (int i = 0; i < vq_nt; i++) {
+        int vq_fd = accept(vq_listen[i], NULL, NULL);
+        close(vq_listen[i]);
+        vq_listen[i] = -1;
+        if (vq_fd < 0) {
+            error_report("remote stub: accept vq connection failed: %s",
+                         strerror(errno));
+            goto fail;
         }
-
-        // trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        CommCTX *comm_ctx = g_hash_table_lookup(gsi_ctxes, DEVICE(vdev)->id);
-
-        if (qatomic_cmpxchg(&comm_ctx->used, false, true)) {
-            // force_printf("[remote_virtio_qeueue_notify_vq] comm_ctx is using");
-            return;
+        int flags = fcntl(vq_fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(vq_fd, F_SETFL, flags | O_NONBLOCK);
         }
+        /* placeholder handler until the stub data path is implemented */
+        aio_set_fd_handler(sctx->aio_ctx, vq_fd,
+                           local_response_handler, NULL, NULL, NULL, sctx->vdev);
+    }
 
-        comm_ctx->ring = g_new0(VirtQueueElement *, RING_SIZE);
-        // reset
-        comm_ctx->sending = comm_ctx->recving = true;
-        comm_ctx->sent = comm_ctx->recved  = comm_ctx->notified = 0;
-        sem_init(&comm_ctx->sem1, 0, 0); sem_init(&comm_ctx->sem2, 0, 0);
+    close(ctl_fd);
+    return;
 
-        QemuThread listener;
-        ListenerParam *listen_param = g_new0(ListenerParam, 1);
-        listen_param->vdev = vdev;
-        listen_param->stub = stub;
-        listen_param->comm_ctx = comm_ctx;
-
-        QemuThread sender;
-        SenderParam *sender_param = g_new0(SenderParam, 1);
-        sender_param->vq = vq;
-        sender_param->stub = stub;
-        sender_param->comm_ctx = comm_ctx;
-
-        qemu_thread_create(&listener, "remote_virtqueue_listener",
-                           resp_listener, listen_param, QEMU_THREAD_DETACHED);
-        qemu_thread_create(&sender, "remote_virtqueue_sender",
-                           route_to_remote, sender_param, QEMU_THREAD_DETACHED);
-
-        while (true) {
-            while (qatomic_read(&comm_ctx->recving) && (comm_ctx->notified >= qatomic_read(&comm_ctx->recved))) {
-                sem_wait(&comm_ctx->sem2);
-            }
-            if (!qatomic_read(&comm_ctx->recving) && (comm_ctx->notified >= qatomic_read(&comm_ctx->recved)))
-                break;
-            // handle a notification
-            virtio_notify(virtqueue_get_vdev(vq), vq);
-            g_free(comm_ctx->ring[comm_ctx->notified % RING_SIZE]);
-
-            comm_ctx->notified++;
-        }
-
-        sem_destroy(&comm_ctx->sem1);
-        sem_destroy(&comm_ctx->sem2);
-        g_free(comm_ctx->ring);
-        comm_ctx->ring = NULL;
-        qatomic_set(&comm_ctx->used, false);
-
-        if (unlikely(vdev->start_on_kick)) {
-            virtio_set_started(vdev, true);
+fail:
+    for (int i = 0; i < vq_nt; i++) {
+        if (vq_listen[i] >= 0) {
+            close(vq_listen[i]);
         }
     }
-    // force_printf("[remote_virtio_queue_notify_vq] return");
-}
-
-// this function is called by the ioeventfd notify
-// direction is guest->host : fe->be : local->remote
-// so we can left meta data of vring in local machine, send elem to remote
-void remote_virtio_queue_host_notifier_read(EventNotifier *n)
-{
-    VirtQueue *vq = host_notifier_to_vq(n);
-    if (event_notifier_test_and_clear(n)) {
-        remote_virtio_queue_notify_vq(vq);
+    if (ctl_fd >= 0) {
+        close(ctl_fd);
     }
 }
-
-void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
-{
-    VirtQueue *vq = host_notifier_to_vq(n);
-
-    remote_virtio_queue_notify_vq(vq);
-}
-
-int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
-{
-    // force_printf("[remote_virtio_device_start_ioeventfd_impl] for vdev:%s", DEVICE(vdev)->id);
-
-    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
-    int i, n, r, err;
-
-    memory_region_transaction_begin();
-    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        r = virtio_bus_set_host_notifier(qbus, n, true);
-        if (r < 0) {
-            err = r;
-            goto assign_error;
-        }
-        // avoid wild pointer
-        virtqueue_set_remote_ctx(vq, NULL);
-        event_notifier_set_handler(virtqueue_get_host_notifier(vq),
-                                   remote_virtio_queue_host_notifier_read);
-    }
-
-    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        event_notifier_set(virtqueue_get_host_notifier(vq));
-    }
-
-    memory_region_transaction_commit();
-    return 0;
-
-assign_error:
-    i = n; /* save n for a second iteration after transaction is committed. */
-    while (--n >= 0) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-
-        event_notifier_set_handler(virtqueue_get_host_notifier(vq), NULL);
-        r = virtio_bus_set_host_notifier(qbus, n, false);
-        assert(r >= 0);
-    }
-    /*
-     * The transaction expects the ioeventfds to be open when it
-     * commits. Do it now, before the cleanup loop.
-     */
-    memory_region_transaction_commit();
-
-    while (--i >= 0) {
-        if (!virtio_queue_get_num(vdev, i)) {
-            continue;
-        }
-        virtio_bus_cleanup_host_notifier(qbus, i);
-    }
-    return err;
-}
-
-void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
-{
-    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
-    int n, r;
-
-    /*
-     * Batch all the host notifiers in a single transaction to avoid
-     * quadratic time complexity in address_space_update_ioeventfds().
-     */
-    memory_region_transaction_begin();
-    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        event_notifier_set_handler(virtqueue_get_host_notifier(vq), NULL);
-        r = virtio_bus_set_host_notifier(qbus, n, false);
-        assert(r >= 0);
-    }
-    /*
-     * The transaction expects the ioeventfds to be open when it
-     * commits. Do it now, before the cleanup loop.
-     */
-    memory_region_transaction_commit();
-
-    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        virtio_bus_cleanup_host_notifier(qbus, n);
-    }
-
-    // need to close sockets
-    close_remote_virtio_device_sockets(vdev);
-    remote_device_clean_up_hash_table(vdev);
-}
-
-// -------------- vhost --------------

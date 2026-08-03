@@ -4109,6 +4109,15 @@ void virtio_queue_host_notifier_read(EventNotifier *n)
     }
 }
 
+// cmsvm
+void virtio_queue_host_notifier_read_local(EventNotifier *n)
+{
+    VirtQueue *vq = container_of(n, VirtQueue, host_notifier);
+    if (event_notifier_test_and_clear(n)) {
+        virtio_queue_notify_vq(vq);
+    }
+}
+
 EventNotifier *virtio_queue_get_host_notifier(VirtQueue *vq)
 {
     return &vq->host_notifier;
@@ -4268,12 +4277,12 @@ static const Property virtio_properties[] = {
 
 static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
-    if (unlikely(check_virtio_device_remote(vdev))) {
-        return remote_virtio_device_start_ioeventfd_impl(vdev);
-    }
-
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
+    void (*cb)(EventNotifier *n) = virtio_queue_host_notifier_read();
+    if (unlikely(is_mosaic(vdev))) {
+        cb = virtio_queue_host_notifier_read_local();
+    }
 
     /*
      * Batch all the host notifiers in a single transaction to avoid
@@ -4290,8 +4299,7 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
             err = r;
             goto assign_error;
         }
-        event_notifier_set_handler(&vq->host_notifier,
-                                   virtio_queue_host_notifier_read);
+        event_notifier_set_handler(&vq->host_notifier, cb);
     }
 
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
@@ -4394,23 +4402,96 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
     virtio_bus_release_ioeventfd(vbus);
 }
 
-// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
-static void virtio_device_set_remote_machine(Object *obj, const char *ip_port, Error **errp)
+// cmsvm: called in local qemu, obj is "virtio-x-pci"
+static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 {
-    // cmsvm: these pointers are share among the same virtio devices
-    // for virtio-blk, we cannot move the system ssd to remote. therefore wee need intercept in fucntions
-    // VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(VIRTIO_DEVICE(obj));
-    // vdc->start_ioeventfd = remote_virtio_device_start_ioeventfd_impl;
-    // vdc->stop_ioeventfd = remote_virtio_device_stop_ioeventfd_impl;
-    remote_uring_init(false);
-    init_remote_virtio_device_sockets(VIRTIO_DEVICE(obj), ip_port, errp);
+    // 1. create aio iothread
+    g_autofree char *iothread_id = g_strdup_printf(DEVICE(obj)->id, obj);
+    IOThread *iothread = iothread_create(iothread_id, errp);
+    if (!iothread) {
+        return;
+    }
+    AioContext *aio_ctx = iothread_get_aio_context(iothread);
+
+    // 2. connect with remote stub
+    VirtIODevice *vdev = VIRTIO_DEVICE(obj);
+    int vq_nt = 0;
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (vq->vring.num)
+            vq_nt += 1;
+    }
+    int *sockets = g_new0(int, vq_nt);
+    int socket = local_connect_socket(ip_port, vq_nt, sockets, errp);
+    if (socket < 0)
+        goto done;
+
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        VirtQueue *vq = &vdev->vq[n];
+        if (!vq->vring.num) {
+            continue; // vq not added in device realize
+        }
+
+        // one TCP connection per vq, tagged with its vq_nr
+        if (local_connect_vq(sockets[n], errp)) {
+            goto fail;
+        }
+
+        // 3. set socket_fd to aio iothread
+        int flags = fcntl(socket_fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
+        }
+        aio_set_fd_handler(aio_ctx, socket_fd,
+                           local_response_handler, NULL, NULL, NULL, NULL);
+    }
+
+    goto done;
+
+fail:
+    /* roll back connections already established for the earlier vqs */
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        VirtQueue *vq = &vdev->vq[n];
+        RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+        if (!ctx) {
+            continue;
+        }
+        aio_set_fd_handler(aio_ctx, ctx->resp_fd, NULL, NULL, NULL, NULL);
+        close(ctx->resp_fd);
+        virtqueue_set_remote_ctx(vq, NULL);
+        g_free(ctx);
+    }
+done:
+    close(fd);
+    g_free(sockets);
 }
 
-// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
+// cmsvm: called in remote stub, obj is "virtio-x-pci"
 static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error **errp)
 {
-    remote_uring_init(true);
-    init_remote_stub_socket(VIRTIO_DEVICE(obj), ip_port, errp);
+    // 1. create aio iothread
+    g_autofree char *iothread_id = g_strdup_printf(DEVICE(obj)->id, obj);
+    IOThread *iothread = iothread_create(iothread_id, errp);
+    if (!iothread) {
+        return;
+    }
+    AioContext *aio_ctx = iothread_get_aio_context(iothread);
+
+    // 2. set socket_fd to aio iothread (accept)
+    int socket_fd = remote_accept(ip_port, errp);
+    if (socket_fd < 0) {
+        return;
+    }
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    RemoteAccept *rctx = g_new0(RemoteAccept, 1);
+    rctx->listen_fd = socket_fd;
+    rctx->aio_ctx = aio_ctx;
+    rctx->vdev = VIRTIO_DEVICE(obj);
+    aio_set_fd_handler(aio_ctx, socket_fd,
+                       remote_accept_handler, NULL, NULL, NULL,
+                       rctx);
 }
 
 // cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
@@ -4431,11 +4512,14 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, virtio_properties);
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
-    // cmsvm
+    // cmsvm: property is set after realization
+    // set by local qemu
     object_class_property_add_str(klass, "remote-machine",
-                                  NULL, virtio_device_set_remote_machine);
+                                  NULL, local_set_remote);
+    // set by remote stub
     object_class_property_add_str(klass, "remote-stub",
                                   NULL, virtio_device_set_remote_stub);
+    // mosaic old: todo
     object_class_property_add_str(klass, "remote-id",
                                   NULL, virtio_device_set_remote_id);
 

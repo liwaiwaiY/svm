@@ -30,33 +30,51 @@ typedef struct RemoteVQueueCtx {
     void *elem;
 } RemoteVQueueCtx;
 
-bool check_virtio_device_remote(VirtIODevice *vdev);
+/*
+* called by local qemu or remote stub
+* check the vdev is a mosaic device
+*/
+bool is_mosaic(VirtIODevice *vdev);
 
-int remote_virtio_device_start_ioeventfd_impl(VirtIODevice *vdev);
-void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
-void remote_virtio_queue_host_notifier_read(EventNotifier *n);
-void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n);
-void init_remote_virtio_device_sockets(VirtIODevice *vdev, const char *ip_port, Error **errp);
-void init_remote_stub_socket(VirtIODevice *vdev, const char *ip_port,Error **errp);
-int remote_uring_init(bool remote_stub);
-void remote_virtio_pci_notify(DeviceState *dev, uint16_t vector);
+/*
+* called by local qemu in property setter ("remote-machine")
+* local qemu coordinate with remote stub to create vq_nt ports
+* on success, sockets[] holds vq_nt connected fds
+*/
+int local_connect_socket(const char *ip_port, int vq_nt, int *sockets, Error **errp);
 
-void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
-void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem, unsigned int len);
-bool remote_virtio_notify_skip(VirtIODevice *vdev);
+/*
+* called by local qemu in peoperty setter ("remote-machine")
+* local qemu connect sockets for each vq
+*/
+bool local_connect_vq(int socket, Error **errp);
 
-void force_printf(const char *fmt, ...);
-bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
-void remote_virtio_register_aio(VirtIODevice *vdev);
+/*
+* called by local qemu in aio iothread, registerd in property setter ("remote-machine")
+* local qemu handle responses with opaque as VirtIODevice *
+*/
+void local_response_handler(void *opaque);
 
-bool remote_virtio_queue_empty(void *opaque);
+/*
+* called by local qemu in ioevent, registed in ioeventfd_impl
+* handle msg in the vq, and send it to remote
+*/
+int local_virtio_queue_host_notifier_read(EventNotifier *n);
 
-void remote_register_id(Object *obj, const char *id, Error **errp);
-// vhost
+/*
+* called by remote stub in property setter ("remote-stub")
+* listen on ip@port and accept one connection from local qemu,
+* returns the connected fd or -1 on error (errp set)
+*/
+int remote_accept(const char *ip_port, Error **errp);
 
+typedef struct RemoteAccept {
+    int listen_fd;
+    AioContext *aio_ctx;
+    VirtIODevice *vdev;
+} RemoteAccept;
 
-typedef struct RingBuf {
-    
-} RingBuf;
+void remote_accept_handler(void *opaque);
+
 
 #endif /* VIRTIO_REMOTE */
