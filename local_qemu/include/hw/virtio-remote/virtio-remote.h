@@ -21,6 +21,7 @@ typedef struct iovec iovec;
 typedef struct RemoteVQueueCtx {
     int resp_fd;
     int vq_nr;
+    AioContext *aio_ctx;    /* aio ctx the vq fd handler is registered on */
     unsigned int elem_index;
     unsigned int out_num;
     unsigned int in_num;
@@ -31,35 +32,63 @@ typedef struct RemoteVQueueCtx {
 } RemoteVQueueCtx;
 
 /*
+* called in local qemu in local_set_remote
+* register a vdev is mosaic-based
+*/
+void register_mosaic(VirtIODevice *vdev);
+
+/*
 * called by local qemu or remote stub
 * check the vdev is a mosaic device
 */
 bool is_mosaic(VirtIODevice *vdev);
 
 /*
-* called by local qemu in property setter ("remote-machine")
-* local qemu coordinate with remote stub to create vq_nt ports
-* on success, sockets[] holds vq_nt connected fds
+* called in local qemu in local_set_remote
+* register aio context without modifyling vdev structure
 */
-int local_connect_socket(const char *ip_port, int vq_nt, int *sockets, Error **errp);
+void local_register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx);
+
+/*
+* called in local qemu
+* search registered aio_ctx for vdev
+*/
+AioContext * local_search_aio_ctx(VirtIODevice *vdev);
+
+/*
+* called by local qemu in property setter ("remote-machine")
+* negotiate per-vq ports with the remote stub over a control connection.
+* Only negotiation here: sockets[] gets vq_nt sockets bound to free local
+* source ports (not connected yet), dst[] gets the stub-side destination
+* addresses. The caller connects each socket with local_connect_vq().
+* On success the control connection fd is returned (or -1 on error).
+*/
+int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
+                         struct sockaddr_in *dst, Error **errp);
 
 /*
 * called by local qemu in peoperty setter ("remote-machine")
-* local qemu connect sockets for each vq
+* local qemu connect an already-created vq socket (pinned source port)
+* to the stub-side address in addr
 */
-bool local_connect_vq(int socket, Error **errp);
+bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 
 /*
-* called by local qemu in aio iothread, registerd in property setter ("remote-machine")
-* local qemu handle responses with opaque as VirtIODevice *
+* called by local qemu in ioeventfd_impl
 */
-void local_response_handler(void *opaque);
+int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
 
 /*
 * called by local qemu in ioevent, registed in ioeventfd_impl
 * handle msg in the vq, and send it to remote
 */
-int local_virtio_queue_host_notifier_read(EventNotifier *n);
+void local_host_notifier_read(EventNotifier *n);
+
+/*
+* called by local qemu in aio iothread, registerd in property setter ("remote-machine")
+* local qemu handle responses with opaque as VirtQueue *
+*/
+void local_response_handler(void *opaque);
 
 /*
 * called by remote stub in property setter ("remote-stub")
@@ -74,7 +103,63 @@ typedef struct RemoteAccept {
     VirtIODevice *vdev;
 } RemoteAccept;
 
+/*
+* called by remote stub in aio iothread, registered in property setter
+* main function of server, handle accept from local qemu
+* coordinate sockets for each vq
+*/
 void remote_accept_handler(void *opaque);
+
+/*
+* called by virtio.c on the remote stub side (vq->remote_ctx set):
+* reconstruct a VirtQueueElement from the request buffered in the vq's
+* RemoteVQueueCtx, exactly one element per received request
+*/
+void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
+
+/*
+* called by virtio.c on the remote stub side: send the response back to
+* local qemu and release the request buffers
+*/
+void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
+                                unsigned int len);
+
+/*
+* called by virtio.c on the remote stub side: 1 if the buffered request of
+* this vq is still in flight (popped but not pushed)
+*/
+bool remote_virtio_queue_empty(void *opaque);
+
+/*
+* called by virtio.c: on the remote stub side the config interrupt has no
+* guest to deliver to, so it must be skipped
+*/
+bool remote_virtio_notify_skip(VirtIODevice *vdev);
+
+/*
+* called by virtio.c: true if this process is the remote stub for vdev
+* (any active vq carries a remote ctx and vdev is not a mosaic device)
+*/
+bool check_virtio_device_remote(VirtIODevice *vdev);
+
+/*
+* called by virtio.c: true if vdev's responses are processed on an iothread
+*/
+bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
+
+/*
+* legacy property "remote-id": keep the device id
+*/
+void remote_register_id(Object *obj, const char *id, Error **errp);
+
+/*
+* legacy stub-side host notifier hooks: the stub has no guest to kick its
+* vqs, so these are inert
+*/
+void remote_virtio_register_aio(VirtIODevice *vdev);
+void remote_virtio_queue_host_notifier_read(EventNotifier *n);
+void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n);
+void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 
 
 #endif /* VIRTIO_REMOTE */

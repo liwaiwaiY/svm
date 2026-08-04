@@ -839,7 +839,7 @@ static int virtio_queue_packed_empty(VirtQueue *vq)
 
 int virtio_queue_empty(VirtQueue *vq)
 {
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
         return remote_virtio_queue_empty(vq->remote_ctx);
     }
 
@@ -941,7 +941,7 @@ static void virtqueue_unmap_sg(VirtQueue *vq, const VirtQueueElement *elem,
 void virtqueue_detach_element(VirtQueue *vq, const VirtQueueElement *elem,
                               unsigned int len)
 {
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
         return;
     }
 
@@ -1129,7 +1129,7 @@ void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx)
 {
     // cmsvm
-    if (vq->remote_ctx) { // if backend uses batching, we don't use it
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // if backend uses batching, we don't use it
         remote_stub_virtqueue_push(vq, elem, len);
         return;
     }
@@ -1272,7 +1272,7 @@ static void virtqueue_ordered_flush(VirtQueue *vq)
 
 void virtqueue_flush(VirtQueue *vq, unsigned int count)
 {
-    if (vq->remote_ctx) {
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
         return;
     }
 
@@ -1294,7 +1294,7 @@ void virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len)
 {
     // cmsvm
-    if (vq->remote_ctx) { // remote stub in
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub in
         remote_stub_virtqueue_push(vq, elem, len);
         return;
     }
@@ -2106,7 +2106,7 @@ err_undo_map:
 
 void *virtqueue_pop(VirtQueue *vq, size_t sz)
 {
-    if (vq->remote_ctx) { // local_qemu this will be NULL
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub in
         return remote_stub_virtqueue_pop(vq, sz);
     }
 
@@ -2814,7 +2814,7 @@ static void virtio_irq(VirtQueue *vq)
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
-    if (vq->remote_ctx) { // remote stub no need for guest
+    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub no need for guest
         return;
     }
 
@@ -4279,9 +4279,9 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
-    void (*cb)(EventNotifier *n) = virtio_queue_host_notifier_read();
     if (unlikely(is_mosaic(vdev))) {
-        cb = virtio_queue_host_notifier_read_local();
+        // register to aio iothread
+        return virtio_device_start_ioeventfd_impl_local(vdev, local_search_aio_ctx(vdev));
     }
 
     /*
@@ -4299,7 +4299,8 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
             err = r;
             goto assign_error;
         }
-        event_notifier_set_handler(&vq->host_notifier, cb);
+        event_notifier_set_handler(&vq->host_notifier,
+                                   virtio_queue_host_notifier_read);
     }
 
     for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
@@ -4411,58 +4412,83 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     if (!iothread) {
         return;
     }
+    /* iothread's aio ctx defaults to poll_max_ns=32768; disable busy poll */
     AioContext *aio_ctx = iothread_get_aio_context(iothread);
+    aio_context_set_poll_params(aio_ctx, 0, 0, 0, errp);
 
     // 2. connect with remote stub
     VirtIODevice *vdev = VIRTIO_DEVICE(obj);
     int vq_nt = 0;
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (vq->vring.num)
+        if (vdev->vq[n].vring.num)
             vq_nt += 1;
     }
     int *sockets = g_new0(int, vq_nt);
-    int socket = local_connect_socket(ip_port, vq_nt, sockets, errp);
+    struct sockaddr_in *dst = g_new0(struct sockaddr_in, vq_nt);
+    int socket = local_connect_socket(ip_port, vq_nt, sockets, dst, errp);
     if (socket < 0)
         goto done;
 
+    /* sockets[]/dst[] are sized by vq_nt, so index them by vq count */
+    int vq_idx = 0;
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
         VirtQueue *vq = &vdev->vq[n];
         if (!vq->vring.num) {
             continue; // vq not added in device realize
         }
 
-        // one TCP connection per vq, tagged with its vq_nr
-        if (local_connect_vq(sockets[n], errp)) {
-            goto fail;
+        if (!vq->remote_ctx) {
+            vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
         }
 
-        // 3. set socket_fd to aio iothread
-        int flags = fcntl(socket_fd, F_GETFL, 0);
-        if (flags >= 0) {
-            fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK);
+        // one TCP connection per vq, tagged with its vq_nr
+        if (!local_connect_vq(sockets[vq_idx], &dst[vq_idx], errp)) {
+            goto fail;
         }
-        aio_set_fd_handler(aio_ctx, socket_fd,
-                           local_response_handler, NULL, NULL, NULL, NULL);
+        vq->remote_ctx->resp_fd = sockets[vq_idx];
+
+        // 3. set socket_fd to aio iothread
+        int flags = fcntl(vq->remote_ctx->resp_fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(vq->remote_ctx->resp_fd, F_SETFL, flags | O_NONBLOCK);
+        }
+        aio_set_fd_handler(aio_ctx, vq->remote_ctx->resp_fd,
+                           local_response_handler, NULL, NULL, NULL,
+                           vq);
+        vq_idx++;
     }
+
+    // 4. register glocal tables
+    register_mosaic(vdev);
+    local_register_aio_ctx(vdev, aio_ctx);
 
     goto done;
 
 fail:
-    /* roll back connections already established for the earlier vqs */
+    /* roll back: detach aio handlers and release per-vq ctxs */
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
         VirtQueue *vq = &vdev->vq[n];
         RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
         if (!ctx) {
             continue;
         }
-        aio_set_fd_handler(aio_ctx, ctx->resp_fd, NULL, NULL, NULL, NULL);
-        close(ctx->resp_fd);
+        if (ctx->resp_fd > 0) {
+            aio_set_fd_handler(aio_ctx, ctx->resp_fd, NULL, NULL, NULL, NULL, NULL);
+        }
         virtqueue_set_remote_ctx(vq, NULL);
         g_free(ctx);
     }
+    /* close every vq socket exactly once (connected or not) */
+    for (int i = 0; i < vq_nt; i++) {
+        if (sockets[i] > 0) {
+            close(sockets[i]);
+            sockets[i] = -1;
+        }
+    }
 done:
-    close(fd);
+    close(socket);
     g_free(sockets);
+    g_free(dst);
 }
 
 // cmsvm: called in remote stub, obj is "virtio-x-pci"
@@ -4474,7 +4500,9 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     if (!iothread) {
         return;
     }
+    /* iothread's aio ctx defaults to poll_max_ns=32768; disable busy poll */
     AioContext *aio_ctx = iothread_get_aio_context(iothread);
+    aio_context_set_poll_params(aio_ctx, 0, 0, 0, errp);
 
     // 2. set socket_fd to aio iothread (accept)
     int socket_fd = remote_accept(ip_port, errp);
