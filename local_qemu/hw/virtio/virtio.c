@@ -4445,7 +4445,6 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
             vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
         }
         RemoteVQueueCtx *ctx = vq->remote_ctx;
-        ctx->aio_ctx = aio_ctx;
 
         // one TCP connection per vq, tagged with its vq_nr
         if (!local_connect_vq(sockets[vq_idx], &dst[vq_idx], errp)) {
@@ -4466,7 +4465,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 
     // 4. register glocal tables
     register_mosaic(vdev);
-    local_register_aio_ctx(vdev, aio_ctx);
+    register_aio_ctx(vdev, aio_ctx);
 
     goto done;
 
@@ -4533,6 +4532,7 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     
     // 3. register global tables
     register_mosaic(VIRTIO_DEVICE(obj));
+    register_aio_ctx(VIRTIO_DEVICE(obj), aio_ctx);
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)

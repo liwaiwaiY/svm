@@ -62,7 +62,7 @@ bool is_mosaic(VirtIODevice *vdev)
 
 static GHashTable *aio_ctxs;
 
-void local_register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx)
+void register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx)
 {
     if (!aio_ctxs)
         aio_ctxs = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -254,6 +254,10 @@ static bool zc_pending_has_elem(int fd, VirtQueueElement *elem)
     }
     return false;
 }
+
+/* defined after the zc section; used by zc_complete_one() below */
+static gpointer pending_key(int resp_fd, unsigned int seq);
+static void local_virtio_notify(void *opaque);
 
 /*
  * one zc send has completed: the network stack no longer references the
@@ -653,24 +657,39 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
 
 int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx)
 {
-    /* attach every active vq's host notifier (guest kick) to the iothread's
-     * aio ctx, so kicks are drained on the iothread instead of the main loop */
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
+    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    int i, n, r, err;
+    memory_region_transaction_begin();
+    // todo: wrong index
+    // todo: think about multi queue
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
         if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        aio_set_event_notifier(ctx, virtqueue_get_host_notifier(vq),
-                               local_host_notifier_read, // read
-                               NULL, NULL); // poll, poll_ready
-        /*
-         * We will have ignored notifications about new requests from the guest
-         * while no notifiers were attached, so "kick" the virt queue to process
-         * those requests now.
-         */
-        event_notifier_set(virtqueue_get_host_notifier(vq));
+        r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, true);
+        if (r != 0) {
+            int j = i;
+            fprintf(stderr, "virtio-blk failed to set host notifier (%d)\n", r);
+            while (i--) {
+                virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, false);
+            }
+            /*
+             * The transaction expects the ioeventfds to be open when it
+             * commits. Do it now, before the cleanup loop.
+             */
+            memory_region_transaction_commit();
+            while (j--) {
+                virtio_bus_cleanup_host_notifier(VIRTIO_BUS(qbus), j);
+            }
+            goto assign_err;
+        }
     }
-    return 0;
+
+    memory_region_transaction_commit();
+    for (uint16_t i = 0; i < s->conf.num_queues; i++) {
+        VirtQueue *vq = virtio_get_queue(vdev, i);
+        virtio_queue_aio_attach_host_notifier(vq, s->vq_aio_context[i]);
+    }
 }
 
 /* key for an in-flight element: (resp_fd, seq) -> VirtQueueElement */
@@ -713,6 +732,14 @@ typedef struct LocalRecvState {
 
 /* retry a deferred elem once the socket is writable again */
 static void local_retry_send(void *opaque);
+
+/* the aio ctx of a vq's socket is owned by the vdev (one iothread per
+ * vdev): look it up in the vdev-level table instead of duplicating the
+ * pointer per vq. Only reached on the rare EAGAIN/connection-error paths. */
+static AioContext *vq_get_aio_ctx(VirtQueue *vq)
+{
+    return local_search_aio_ctx(virtqueue_get_vdev(vq));
+}
 
 static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
 {
@@ -823,8 +850,9 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
              * socket becomes writable, instead of dropping the request. The
              * aio loop keeps running; only this vq's sending is stalled. */
             ctx->pending_elem = elem;
-            if (ctx->aio_ctx) {
-                aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+            AioContext *ctx_aio = vq_get_aio_ctx(vq);
+            if (ctx_aio) {
+                aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                                    local_response_handler, NULL, NULL,
                                    local_retry_send, vq);
             }
@@ -888,8 +916,9 @@ static void local_retry_send(void *opaque)
             return;
         }
     }
-    if (ctx->aio_ctx) {
-        aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+    AioContext *ctx_aio = vq_get_aio_ctx(vq);
+    if (ctx_aio) {
+        aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                            local_response_handler, NULL, NULL, NULL, vq);
     }
     local_handle_output(vq);
@@ -1244,8 +1273,9 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                 sr->in_bufs[i] = elem->in_sg[i].iov_base;
             }
             ctx->pending_resp = sr;
-            if (ctx->aio_ctx) {
-                aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+            AioContext *ctx_aio = vq_get_aio_ctx(vq);
+            if (ctx_aio) {
+                aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                                    remote_stub_req_handler, NULL, NULL,
                                    remote_stub_retry_send, vq);
             }
@@ -1302,9 +1332,10 @@ static void remote_stub_retry_send(void *opaque)
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     StubResp *sr = ctx->pending_resp;
+    AioContext *ctx_aio = vq_get_aio_ctx(vq);
     if (!sr) {
-        if (ctx->aio_ctx) {
-            aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+        if (ctx_aio) {
+            aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                                remote_stub_req_handler, NULL, NULL, NULL, vq);
         }
         return;
@@ -1327,8 +1358,8 @@ static void remote_stub_retry_send(void *opaque)
     }
     g_free(sr->in_bufs);
     g_free(sr);
-    if (ctx->aio_ctx) {
-        aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+    if (ctx_aio) {
+        aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                            remote_stub_req_handler, NULL, NULL, NULL, vq);
     }
     /* delivery may have been deferred while the socket was full */
@@ -1566,8 +1597,9 @@ conn_err:
     }
     g_hash_table_remove(stub_recv_states, GINT_TO_POINTER(fd));
     g_free(rs);
-    if (ctx->aio_ctx) {
-        aio_set_fd_handler(ctx->aio_ctx, fd, NULL, NULL, NULL, NULL, NULL);
+    AioContext *ctx_aio = vq_get_aio_ctx(vq);
+    if (ctx_aio) {
+        aio_set_fd_handler(ctx_aio, fd, NULL, NULL, NULL, NULL, NULL);
     }
     close(fd);
     ctx->resp_fd = -1;
@@ -1739,7 +1771,6 @@ void remote_accept_handler(void *opaque)
         }
         ctx->resp_fd = vq_fd;
         ctx->vq_nr = n;
-        ctx->aio_ctx = sctx->aio_ctx;
         zc_enable(vq_fd);
         aio_set_fd_handler(sctx->aio_ctx, vq_fd,
                            remote_stub_req_handler, NULL, NULL, NULL, vq);

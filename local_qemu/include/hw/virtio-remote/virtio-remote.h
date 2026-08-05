@@ -21,7 +21,6 @@ typedef struct iovec iovec;
 typedef struct RemoteVQueueCtx {
     int resp_fd;
     int vq_nr;
-    AioContext *aio_ctx;    /* aio ctx the vq fd handler is registered on */
     unsigned int elem_index;
     unsigned int out_num;
     unsigned int in_num;
@@ -48,10 +47,10 @@ void register_mosaic(VirtIODevice *vdev);
 bool is_mosaic(VirtIODevice *vdev);
 
 /*
-* called in local qemu in local_set_remote
+* called in local qemu and remote stub in property setter
 * register aio context without modifyling vdev structure
 */
-void local_register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx);
+void register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx);
 
 /*
 * called in local qemu
@@ -79,6 +78,8 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 
 /*
 * called by local qemu in ioeventfd_impl
+* this will be called only by vdev which originally use main loop
+* vdev that originally use aio will use aio_attach in virtio.c
 */
 int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
 
