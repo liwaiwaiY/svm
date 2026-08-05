@@ -29,6 +29,10 @@ typedef struct RemoteVQueueCtx {
     struct iovec *in_sg;
     // VirtQueueElement elem;
     void *elem;
+    /* local: VirtQueueElement deferred for a send retry (socket was full) */
+    void *pending_elem;
+    /* stub: StubResp deferred for a response send retry (socket was full) */
+    void *pending_resp;
 } RemoteVQueueCtx;
 
 /*
@@ -91,17 +95,21 @@ void local_host_notifier_read(EventNotifier *n);
 void local_response_handler(void *opaque);
 
 /*
-* called by remote stub in property setter ("remote-stub")
-* listen on ip@port and accept one connection from local qemu,
-* returns the connected fd or -1 on error (errp set)
+* used in remote stub in accept handler
+* to pass essential params
 */
-int remote_accept(const char *ip_port, Error **errp);
-
 typedef struct RemoteAccept {
     int listen_fd;
     AioContext *aio_ctx;
     VirtIODevice *vdev;
 } RemoteAccept;
+
+/*
+* called by remote stub in property setter ("remote-stub")
+* listen on ip@port and accept one connection from local qemu,
+* returns the connected fd or -1 on error (errp set)
+*/
+int remote_accept(const char *ip_port, Error **errp);
 
 /*
 * called by remote stub in aio iothread, registered in property setter

@@ -42,6 +42,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <linux/errqueue.h>
 #include <stdbool.h>
 
 static GHashTable *mosaic;
@@ -79,7 +80,7 @@ static bool stub_vdev_has_remote_vq(VirtIODevice *vdev)
 {
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
         VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (virtio_queue_get_num(vdev, n) && vq->remote_ctx) {
+        if (virtio_queue_get_num(vdev, n) && virtqueue_get_remote_ctx(vq)) {
             return true;
         }
     }
@@ -174,6 +175,215 @@ static GHashTable *recv_states;
 
 /* stub-side per-connection incremental request receive state, keyed by fd */
 static GHashTable *stub_recv_states;
+
+/*
+ * MSG_ZEROCOPY support (send side only).
+ *
+ * With SO_ZEROCOPY + MSG_ZEROCOPY the NIC DMA's the payload straight from
+ * the (pinned) user pages, skipping the copy into the kernel skb - i.e.
+ * the NIC reads directly from CPU memory. The kernel is free to fall back
+ * to copying for segments it cannot pin (unaligned / partial pages); in
+ * that case the send still succeeds and a completion is still queued, just
+ * with SO_EE_CODE_ZEROCOPY_COPIED set. A completion is guaranteed for
+ * every successful (ret > 0) zc send, and the sent buffers are referenced
+ * by the network stack until that completion arrives, so we must not free
+ * them (or let the guest reuse them) beforehand.
+ *
+ * The receive side cannot be zero-copy'd on TCP: the NIC DMA's into kernel
+ * pages and recv() copies them into the user buffer. Only the send side
+ * gets the "NIC <-> user memory" zero-copy.
+ */
+#define ZC_SEND_MIN (4 * 1024) /* only try zc for payloads >= this */
+
+typedef struct ZcPending {
+    uint32_t serial;          /* kernel zc serial of this send */
+    /* buffers the network stack may still reference (both sides) */
+    void **bufs;
+    unsigned int n_bufs;
+    /* local side: elem whose used-ring push must wait for the completion */
+    VirtQueueElement *elem;
+    VirtQueue *vq;
+    unsigned int seq;
+    unsigned int push_len;    /* resp len; valid once len_known */
+    bool len_known;
+} ZcPending;
+
+typedef struct ZcFdState {
+    bool enabled;             /* SO_ZEROCOPY accepted on this socket */
+    uint32_t serial;          /* kernel serial expected for the next zc send */
+    GSList *pending;          /* ZcPending, matched by serial */
+} ZcFdState;
+
+static GHashTable *zc_fds;    /* resp_fd -> ZcFdState */
+
+static ZcFdState *zc_fd_state(int fd)
+{
+    if (!zc_fds) {
+        zc_fds = g_hash_table_new(g_direct_hash, g_direct_equal);
+    }
+    ZcFdState *st = g_hash_table_lookup(zc_fds, GINT_TO_POINTER(fd));
+    if (!st) {
+        st = g_new0(ZcFdState, 1);
+        g_hash_table_insert(zc_fds, GINT_TO_POINTER(fd), st);
+    }
+    return st;
+}
+
+static ZcFdState *zc_fd_state_find(int fd)
+{
+    return zc_fds ? g_hash_table_lookup(zc_fds, GINT_TO_POINTER(fd)) : NULL;
+}
+
+static void zc_enable(int fd)
+{
+    int one = 1;
+    ZcFdState *st = zc_fd_state(fd);
+    st->enabled = setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &one, sizeof(one)) == 0;
+}
+
+static bool zc_pending_has_elem(int fd, VirtQueueElement *elem)
+{
+    ZcFdState *st = zc_fd_state_find(fd);
+    if (!st) {
+        return false;
+    }
+    for (GSList *it = st->pending; it; it = it->next) {
+        if (((ZcPending *)it->data)->elem == elem) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * one zc send has completed: the network stack no longer references the
+ * sent buffers, so they can be released / handed back to the guest.
+ * Returns true if zp was fully consumed (freed); false if it must stay in
+ * the pending list (local side: the response has not arrived yet).
+ */
+static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
+{
+    if (zp->bufs) {
+        for (unsigned int i = 0; i < zp->n_bufs; i++) {
+            if (zp->bufs[i]) {
+                free(zp->bufs[i]);
+            }
+        }
+        g_free(zp->bufs);
+        zp->bufs = NULL;
+    }
+
+    if (zp->elem && !zp->len_known) {
+        /* local side, completion first: the response is still in flight.
+         * Keep zp so the response handler can finish the push when the
+         * data arrives (it will find bufs == NULL and push right away). */
+        return false;
+    }
+
+    if (zp->elem) {
+        /* local side: the NIC is done with the guest's out buffers, so the
+         * used-ring entry can now be pushed (both the completion and the
+         * response have arrived) */
+        virtqueue_push(zp->vq, zp->elem, zp->push_len);
+        if (pending_elems) {
+            g_hash_table_remove(pending_elems, pending_key(fd, zp->seq));
+        }
+        defer_call(local_virtio_notify, zp->vq);
+        g_free(zp->elem);
+    }
+    g_free(zp);
+    return true;
+}
+
+/*
+ * drain the socket error queue: each entry is a completion notification for
+ * the zc sends whose serial is in [ee_info, ee_data] (inclusive, may wrap)
+ */
+static void zc_drain(int fd)
+{
+    ZcFdState *st = zc_fd_state_find(fd);
+    if (!st) {
+        return;
+    }
+    char ctrl[CMSG_SPACE(sizeof(struct sock_extended_err)) * 16];
+    char data[128];
+    for (;;) {
+        struct iovec iov = { data, sizeof(data) };
+        struct msghdr m = { 0 };
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = ctrl;
+        m.msg_controllen = sizeof(ctrl);
+        ssize_t n = recvmsg(fd, &m, MSG_ERRQUEUE);
+        if (n < 0) {
+            break; /* EAGAIN: error queue drained */
+        }
+        struct cmsghdr *cm;
+        for (cm = CMSG_FIRSTHDR(&m); cm; cm = CMSG_NXTHDR(&m, cm)) {
+            struct sock_extended_err *serr = (void *)CMSG_DATA(cm);
+            if (serr->ee_origin != SO_EE_ORIGIN_ZEROCOPY) {
+                continue;
+            }
+            uint32_t first = serr->ee_info;
+            uint32_t last = serr->ee_data;
+            GSList *it = st->pending;
+            while (it) {
+                ZcPending *zp = it->data;
+                GSList *next = it->next;
+                bool hit;
+                if (first <= last) {
+                    hit = zp->serial >= first && zp->serial <= last;
+                } else {
+                    /* serial counter wrapped */
+                    hit = zp->serial >= first || zp->serial <= last;
+                }
+                if (hit) {
+                    /* delete from the list, but only keep it deleted if
+                     * zc_complete_one consumed zp; when it returns false the
+                     * local-side response is still in flight and the response
+                     * handler needs to find zp to finish the push */
+                    st->pending = g_slist_delete_link(st->pending, it);
+                    if (!zc_complete_one(st, zp, fd)) {
+                        st->pending = g_slist_prepend(st->pending, zp);
+                    }
+                }
+                it = next;
+            }
+        }
+    }
+}
+
+/* connection torn down: release every zc send still in flight */
+static void zc_fd_teardown(int fd)
+{
+    ZcFdState *st = zc_fd_state_find(fd);
+    if (!st) {
+        return;
+    }
+    GSList *list = st->pending;
+    st->pending = NULL;
+    for (GSList *it = list; it; it = it->next) {
+        ZcPending *zp = it->data;
+        if (zp->bufs) {
+            for (unsigned int i = 0; i < zp->n_bufs; i++) {
+                if (zp->bufs[i]) {
+                    free(zp->bufs[i]);
+                }
+            }
+            g_free(zp->bufs);
+        }
+        if (zp->elem) {
+            if (pending_elems) {
+                g_hash_table_remove(pending_elems, pending_key(fd, zp->seq));
+            }
+            g_free(zp->elem);
+        }
+        g_free(zp);
+    }
+    g_slist_free(list);
+    g_hash_table_remove(zc_fds, GINT_TO_POINTER(fd));
+    g_free(st);
+}
 
 // enable socket keepalive in kernel, ~55s maximum link down detection
 static void enable_tcp_keepalive(int fd)
@@ -284,15 +494,6 @@ static int connect_with_retry(int *fdp, const struct sockaddr_in *addr,
     return -1;
 }
 
-/*
- * called by local qemu: negotiate per-vq ports with the remote stub.
- * Only negotiation here: the vq sockets are created and bound to a free
- * local source port, and the stub-side destination addresses are handed
- * out via dst[]. No connection is established yet - the caller connects
- * each socket with local_connect_vq().
- *
- * on success the control connection fd is returned (or -1 on error, errp set)
- */
 int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
                          struct sockaddr_in *dst, Error **errp)
 {
@@ -325,9 +526,7 @@ int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
 
     /*
      * The remote stub is assumed to be up before local qemu starts, but it
-     * may take a moment to bind/listen, so retry a few times. Each attempt is
-     * bounded by SO_SNDTIMEO, otherwise an unreachable host would stall the
-     * main thread for the whole TCP SYN retry period (minutes).
+     * may take a moment to bind/listen, so retry a few times.
      */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -340,16 +539,7 @@ int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
         return -1;
     }
 
-    /*
-     * One TCP connection per vq. Here we only negotiate the ports and pin
-     * the four-tuple (src_ip, src_port, dst_ip, dst_port) for each vq:
-     * 1. create vq_nt sockets and bind them to free local source ports
-     *    (kernel picks via port 0) - this fixes the source side.
-     * 2. send the source ports to the remote stub over the control fd.
-     * 3. receive the stub-side ports; dst[] records the destination side.
-     * No connect() happens here: local_connect_vq() establishes the actual
-     * connection on these pinned sockets afterwards.
-     */
+    /* One TCP connection per vq. */
     int last_errno = 0;
     if (vq_nt > VIRTIO_QUEUE_MAX) {
         last_errno = EINVAL;
@@ -451,19 +641,13 @@ err:
     return -1;
 }
 
-/*
- * called by local qemu: establish the connection on a vq socket that was
- * already created and source-pinned during negotiation (local_connect_socket),
- * connecting it to the stub-side address in addr. The fd is reused across
- * retries because recreating it would change the source port and break the
- * negotiated four-tuple.
- */
 bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
 {
     if (connect_with_retry(&socket, addr, false, errp) < 0) {
         return false;
     }
     enable_tcp_keepalive(socket);
+    zc_enable(socket);
     return true;
 }
 
@@ -472,11 +656,11 @@ int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx
     /* attach every active vq's host notifier (guest kick) to the iothread's
      * aio ctx, so kicks are drained on the iothread instead of the main loop */
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = &vdev->vq[n];
-        if (!vq->vring.num) {
+        VirtQueue *vq = virtio_get_queue(vdev, n);
+        if (!virtio_queue_get_num(vdev, n)) {
             continue;
         }
-        aio_set_event_notifier(ctx, &vq->host_notifier,
+        aio_set_event_notifier(ctx, virtqueue_get_host_notifier(vq),
                                local_host_notifier_read, // read
                                NULL, NULL); // poll, poll_ready
         /*
@@ -484,7 +668,7 @@ int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx
          * while no notifiers were attached, so "kick" the virt queue to process
          * those requests now.
          */
-        event_notifier_set(&vq->host_notifier);
+        event_notifier_set(virtqueue_get_host_notifier(vq));
     }
     return 0;
 }
@@ -502,7 +686,7 @@ static gpointer pending_key(int resp_fd, unsigned int seq)
 static void local_virtio_notify(void *opaque)
 {
     VirtQueue *vq = opaque;
-    virtio_notify(vq->vdev, vq);
+    virtio_notify(virtqueue_get_vdev(vq), vq);
 }
 
 /*
@@ -526,6 +710,10 @@ typedef struct LocalRecvState {
  * response path which will virtqueue_push() it.
  * Returns false if the socket send buffer is full (caller stops draining).
  */
+
+/* retry a deferred elem once the socket is writable again */
+static void local_retry_send(void *opaque);
+
 static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
@@ -561,15 +749,85 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
         .msg_iovlen = elem->out_num + 2,
     };
 
-    ssize_t ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+    ssize_t total = msg_sg[0].iov_len + msg_sg[1].iov_len;
+    for (unsigned int i = 0; i < elem->out_num; i++) {
+        total += elem->out_sg[i].iov_len;
+    }
+
+    /*
+     * Try MSG_ZEROCOPY for large requests: the NIC DMA's the out buffers
+     * straight from the guest RAM pages (no skb copy). The kernel decides
+     * per segment - anything it cannot pin is copied and a completion is
+     * still queued, so the bookkeeping below is always correct.
+     */
+    ZcFdState *st = zc_fd_state_find(ctx->resp_fd);
+    bool used_zc = false;
+    ssize_t ret;
+    if (st && st->enabled && total >= ZC_SEND_MIN) {
+        ret = sendmsg(ctx->resp_fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
+        if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
+            /* kernel refuses zc for this call: fall back to a copy send */
+            ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+        } else if (ret > 0) {
+            used_zc = true;
+        }
+    } else {
+        ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+    }
+
+    if (used_zc) {
+        /*
+         * The kernel may still reference the header/lens and the guest's
+         * out buffers until the completion arrives, so keep them alive. The
+         * guest cannot reuse its out buffers until the used-ring push, and
+         * the push is deferred until the completion (see zc_complete_one /
+         * the response handler), which is exactly the ack from the stub.
+         */
+        void **bufs = g_new(void *, 3);
+        bufs[0] = header;
+        bufs[1] = lens;
+        bufs[2] = msg_sg;
+        ZcPending *zp = g_new0(ZcPending, 1);
+        zp->serial = st->serial++;
+        zp->bufs = bufs;
+        zp->n_bufs = 3;
+        zp->elem = elem;
+        zp->vq = vq;
+        zp->seq = seq;
+        if (elem->in_num == 0) {
+            /* no response comes back: push the used ring when the NIC
+             * completion arrives */
+            zp->len_known = true;
+            zp->push_len = 0;
+        }
+        st->pending = g_slist_prepend(st->pending, zp);
+
+        if (elem->in_num > 0) {
+            /* track the in-flight elem so its response can be matched by seq */
+            if (!pending_elems) {
+                pending_elems = g_hash_table_new(g_direct_hash, g_direct_equal);
+            }
+            g_hash_table_insert(pending_elems,
+                                pending_key(ctx->resp_fd, seq), elem);
+        }
+        return true;
+    }
+
     g_free(lens);
     g_free(header);
     g_free(msg_sg);
 
     if (ret < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* send buffer full; stop draining, retry on the next kick.
-             * TODO: keep the elem and retry via an io_write handler */
+            /* send buffer full: hang the elem on the vq and retry when the
+             * socket becomes writable, instead of dropping the request. The
+             * aio loop keeps running; only this vq's sending is stalled. */
+            ctx->pending_elem = elem;
+            if (ctx->aio_ctx) {
+                aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+                                   local_response_handler, NULL, NULL,
+                                   local_retry_send, vq);
+            }
             return false;
         }
         error_report("local qemu: sendmsg to stub failed: %s", strerror(errno));
@@ -595,6 +853,13 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
 
 static void local_handle_output(VirtQueue *vq)
 {
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    if (!ctx || ctx->pending_elem) {
+        /* an elem is already deferred for a send retry: don't pop more
+         * (their payloads would not be sent and the elem would leak); the
+         * writable handler drains the vq once the send goes out */
+        return;
+    }
     /* drain the vring: pop and submit as many elems as possible without
      * blocking the aio loop */
     while (true) {
@@ -608,17 +873,39 @@ static void local_handle_output(VirtQueue *vq)
     }
 }
 
+/* io_write handler: the socket has send buffer space again, so retry the
+ * deferred elem; once it is out, drop the write handler and drain the vq */
+static void local_retry_send(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    VirtQueueElement *elem = ctx->pending_elem;
+    if (elem) {
+        ctx->pending_elem = NULL;
+        if (!local_send_msg(vq, elem)) {
+            /* still full: keep waiting for the next writable event */
+            ctx->pending_elem = elem;
+            return;
+        }
+    }
+    if (ctx->aio_ctx) {
+        aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+                           local_response_handler, NULL, NULL, NULL, vq);
+    }
+    local_handle_output(vq);
+}
+
 void local_host_notifier_read(EventNotifier *n)
 {
     VirtQueue *vq = host_notifier_to_vq(n);
     if (!event_notifier_test_and_clear(n)) {
         return;
     }
-    VirtIODevice *vdev = vq->vdev;
+    VirtIODevice *vdev = virtqueue_get_vdev(vq);
     if (unlikely(vdev->broken)) {
         return;
     }
-    if (!vq->vring.desc || !vq->handle_output) {
+    if (!virtqueue_get_vring_desc(vq) || !virtqueue_get_handle_output(vq)) {
         return;
     }
     local_handle_output(vq);
@@ -632,6 +919,10 @@ void local_response_handler(void *opaque)
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     int fd = ctx->resp_fd;
+
+    /* drain MSG_ZEROCOPY completions: each one may release a deferred
+     * used-ring push (POLLERR on this fd wakes this handler) */
+    zc_drain(fd);
 
     if (!recv_states) {
         recv_states = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -686,12 +977,49 @@ void local_response_handler(void *opaque)
         if (rs->stage == 1) {
             VirtQueueElement *elem = rs->cur;
             if (rs->cur_off >= rs->need_len) {
-                /* response complete: return the elem to the used ring */
-                virtqueue_push(vq, elem, rs->need_len);
-                g_hash_table_remove(pending_elems,
-                                    pending_key(fd, rs->cur_seq));
-                defer_call(local_virtio_notify, vq);
-                g_free(elem);
+                /* response complete: return the elem to the used ring. If it
+                 * was sent with MSG_ZEROCOPY, the guest may not reuse its
+                 * out buffers until the NIC is done (zc completion), so
+                 * defer the push until the completion has arrived. */
+                ZcFdState *st = zc_fd_state_find(fd);
+                ZcPending *zp = NULL;
+                if (st) {
+                    for (GSList *it = st->pending; it; it = it->next) {
+                        ZcPending *p = it->data;
+                        if (p->elem == elem) {
+                            zp = p;
+                            break;
+                        }
+                    }
+                }
+                if (zp) {
+                    zp->push_len = rs->need_len;
+                    zp->len_known = true;
+                    /*
+                     * If the zc completion already ran, the send buffers
+                     * are released (zp->bufs == NULL) and we only need to
+                     * push. Otherwise keep the elem here until zc_drain()
+                     * runs (the completion for this send also ends up in
+                     * the error queue and wakes this handler via POLLERR).
+                     */
+                    if (!zp->bufs) {
+                        st->pending = g_slist_remove(st->pending, zp);
+                        virtqueue_push(vq, elem, rs->need_len);
+                        g_hash_table_remove(pending_elems,
+                                            pending_key(fd, rs->cur_seq));
+                        defer_call(local_virtio_notify, vq);
+                        g_free(elem);
+                        g_free(zp);
+                    }
+                    /* else: completion still pending; keep the elem, the
+                     * used-ring push happens in zc_drain() */
+                } else {
+                    virtqueue_push(vq, elem, rs->need_len);
+                    g_hash_table_remove(pending_elems,
+                                        pending_key(fd, rs->cur_seq));
+                    defer_call(local_virtio_notify, vq);
+                    g_free(elem);
+                }
                 rs->stage = 0;
                 rs->hdr_off = 0;
                 rs->cur = NULL;
@@ -739,11 +1067,22 @@ void local_response_handler(void *opaque)
     }
 
 conn_err:
-    /* the connection is unusable; drop the in-flight elem and reset state */
+    /* the connection is unusable; drop the in-flight elem and reset state.
+     * zc_fd_teardown() owns (frees) every elem still tracked by the zc
+     * layer, so only free rs->cur here if it is not one of them. */
+    bool cur_is_zc = rs->cur && zc_pending_has_elem(fd, rs->cur);
+    zc_fd_teardown(fd);
     if (rs->cur) {
         g_hash_table_remove(pending_elems, pending_key(fd, rs->cur_seq));
-        g_free(rs->cur);
+        if (!cur_is_zc) {
+            g_free(rs->cur);
+        }
         rs->cur = NULL;
+    }
+    /* a send-retry elem never made it onto the wire; release it too */
+    if (ctx->pending_elem) {
+        g_free(ctx->pending_elem);
+        ctx->pending_elem = NULL;
     }
     rs->stage = 0;
     rs->hdr_off = 0;
@@ -810,6 +1149,25 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 }
 
 /*
+ * a response that could not be sent because the socket send buffer was full.
+ * Owns everything needed to retry it on the next writable event and to
+ * release the retained buffers once it goes out.
+ */
+typedef struct StubResp {
+    int *header;          /* resp header, owned until sent */
+    struct iovec *iov;    /* resp_iov: [header, in_sg...], owned until sent */
+    int iov_cnt;
+    void **in_bufs;       /* bases of the in_sg payload buffers */
+    unsigned int n_in_sg;
+} StubResp;
+
+/* retry a deferred response once the socket is writable again */
+static void remote_stub_retry_send(void *opaque);
+
+/* stub-side request receiver; forward decl (defined after this function) */
+static void remote_stub_req_handler(void *opaque);
+
+/*
  * called by virtio.c through virtqueue_push()/virtqueue_fill() when
  * vq->remote_ctx is set (remote stub side). Sends the response back to local
  * qemu as [vq_nr(4B)][elem_index(4B)][data_len(4B)][data...] and releases the
@@ -819,6 +1177,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    bool in_sg_deferred = false; /* in_sg released on a zc completion */
 
     if (ctx && elem->in_num > 0) {
         int *resp_header = g_new0(int, 3);
@@ -849,21 +1208,131 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
             .msg_iov = resp_iov,
             .msg_iovlen = sgs + 1,
         };
-        ssize_t ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+
+        /*
+         * Try MSG_ZEROCOPY for large responses: the in_sg buffers are
+         * page-aligned (see remote_stub_req_handler), so the NIC can DMA
+         * the payload straight from them. Everything the kernel may still
+         * reference is released on the completion (drained by zc_drain).
+         */
+        ZcFdState *st = zc_fd_state_find(ctx->resp_fd);
+        bool used_zc = false;
+        ssize_t ret;
+        if (st && st->enabled && len >= ZC_SEND_MIN) {
+            ret = sendmsg(ctx->resp_fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
+            if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
+                /* kernel refuses zc for this call: fall back to a copy send */
+                ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+            } else if (ret > 0) {
+                used_zc = true;
+            }
+        } else {
+            ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+        }
+        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* resp buffer full: keep the header, iov and in_sg payload and
+             * retry on the next writable event instead of dropping the resp
+             * (a dropped resp would hang the local elem forever). The aio
+             * loop keeps running; only this vq's response is stalled. */
+            StubResp *sr = g_new0(StubResp, 1);
+            sr->header = resp_header;
+            sr->iov = resp_iov;
+            sr->iov_cnt = sgs + 1;
+            sr->n_in_sg = elem->in_num;
+            sr->in_bufs = g_new(void *, elem->in_num);
+            for (unsigned int i = 0; i < elem->in_num; i++) {
+                sr->in_bufs[i] = elem->in_sg[i].iov_base;
+            }
+            ctx->pending_resp = sr;
+            if (ctx->aio_ctx) {
+                aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+                                   remote_stub_req_handler, NULL, NULL,
+                                   remote_stub_retry_send, vq);
+            }
+            /* bases are kept by StubResp; only out_sg is released below */
+            in_sg_deferred = true;
+            goto free_bufs;
+        }
         if (ret < 0) {
             error_report("remote stub: sendmsg resp failed: %s", strerror(errno));
         }
-        g_free(resp_header);
-        g_free(resp_iov);
+
+        if (used_zc) {
+            /* release resp_header, resp_iov and the sent in buffers on the
+             * completion, not now; in buffers beyond sgs are untouched and
+             * can go right away */
+            in_sg_deferred = true;
+            for (unsigned int i = sgs; i < elem->in_num; i++) {
+                free(elem->in_sg[i].iov_base);
+            }
+            void **bufs = g_new(void *, 2 + sgs);
+            unsigned int n = 0;
+            bufs[n++] = resp_header;
+            bufs[n++] = resp_iov;
+            for (unsigned int i = 0; i < sgs; i++) {
+                bufs[n++] = elem->in_sg[i].iov_base;
+            }
+            ZcPending *zp = g_new0(ZcPending, 1);
+            zp->serial = st->serial++;
+            zp->bufs = bufs;
+            zp->n_bufs = n;
+            st->pending = g_slist_prepend(st->pending, zp);
+        } else {
+            g_free(resp_header);
+            g_free(resp_iov);
+        }
     }
 
 free_bufs:
     for (unsigned int i = 0; i < elem->out_num && elem->out_sg[i].iov_base; i++) {
         g_free(elem->out_sg[i].iov_base);
     }
-    for (unsigned int i = 0; i < elem->in_num && elem->in_sg[i].iov_base; i++) {
-        g_free(elem->in_sg[i].iov_base);
+    if (!in_sg_deferred) {
+        for (unsigned int i = 0; i < elem->in_num && elem->in_sg[i].iov_base; i++) {
+            free(elem->in_sg[i].iov_base);
+        }
     }
+}
+
+/* io_write handler: the socket has send buffer space again, so retry the
+ * deferred response. Once it is out, release the retained buffers, drop the
+ * write handler and resume request delivery. */
+static void remote_stub_retry_send(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    StubResp *sr = ctx->pending_resp;
+    if (!sr) {
+        if (ctx->aio_ctx) {
+            aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+                               remote_stub_req_handler, NULL, NULL, NULL, vq);
+        }
+        return;
+    }
+    struct msghdr msg = { .msg_iov = sr->iov, .msg_iovlen = sr->iov_cnt };
+    ssize_t ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+    if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return; /* still full: keep waiting for the next writable event */
+    }
+    if (ret < 0) {
+        error_report("remote stub: retry sendmsg resp failed: %s",
+                     strerror(errno));
+    }
+    /* sent (or fatal): the payload is no longer needed */
+    ctx->pending_resp = NULL;
+    g_free(sr->header);
+    g_free(sr->iov);
+    for (unsigned int i = 0; i < sr->n_in_sg; i++) {
+        free(sr->in_bufs[i]);
+    }
+    g_free(sr->in_bufs);
+    g_free(sr);
+    if (ctx->aio_ctx) {
+        aio_set_fd_handler(ctx->aio_ctx, ctx->resp_fd,
+                           remote_stub_req_handler, NULL, NULL, NULL, vq);
+    }
+    /* delivery may have been deferred while the socket was full */
+    remote_stub_req_handler(vq);
 }
 
 /*
@@ -897,6 +1366,10 @@ static void remote_stub_req_handler(void *opaque)
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     int fd = ctx->resp_fd;
+
+    /* drain MSG_ZEROCOPY completions so deferred response buffers can be
+     * released (POLLERR on this fd wakes this handler) */
+    zc_drain(fd);
 
     if (!stub_recv_states) {
         stub_recv_states = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -979,7 +1452,19 @@ static void remote_stub_req_handler(void *opaque)
             }
             for (unsigned int i = 0; i < rs->in_num; i++) {
                 rs->in_sg[i].iov_len = rs->lens[rs->out_num + i];
-                rs->in_sg[i].iov_base = g_new(char, rs->in_sg[i].iov_len);
+                /* page-aligned (and page-multiple sized) so the response
+                 * send can use MSG_ZEROCOPY and let the NIC DMA straight
+                 * from these buffers; freed with free() */
+                if (rs->in_sg[i].iov_len == 0) {
+                    rs->in_sg[i].iov_base = NULL;
+                } else if (posix_memalign(&rs->in_sg[i].iov_base, getpagesize(),
+                                          QEMU_ALIGN_UP(rs->in_sg[i].iov_len,
+                                                        getpagesize())) != 0) {
+                    error_report("remote stub: posix_memalign failed: %s",
+                                 strerror(errno));
+                    rs->in_sg[i].iov_base = NULL;
+                    goto conn_err;
+                }
             }
             rs->stage = 2;
         }
@@ -1016,6 +1501,13 @@ static void remote_stub_req_handler(void *opaque)
             }
 
             /* full request received: deliver it to the device */
+            if (ctx->pending_resp) {
+                /* a previous resp is still queued for a writable retry;
+                 * deferring delivery keeps the device from pushing another
+                 * resp over the pending one. remote_stub_retry_send resumes
+                 * request processing once the socket drains. */
+                return;
+            }
             ctx->elem_index = rs->seq;
             ctx->out_num = rs->out_num;
             ctx->in_num = rs->in_num;
@@ -1044,6 +1536,7 @@ static void remote_stub_req_handler(void *opaque)
 
 conn_err:
     /* the connection is unusable: release partial buffers, then drop it */
+    zc_fd_teardown(fd);
     if (rs->lens) {
         g_free(rs->lens);
     }
@@ -1055,9 +1548,21 @@ conn_err:
     }
     if (rs->in_sg) {
         for (unsigned int i = 0; i < rs->in_num && rs->in_sg[i].iov_base; i++) {
-            g_free(rs->in_sg[i].iov_base);
+            free(rs->in_sg[i].iov_base); /* posix_memalign'd */
         }
         g_free(rs->in_sg);
+    }
+    /* a response still waiting for a writable retry never went out */
+    if (ctx->pending_resp) {
+        StubResp *sr = ctx->pending_resp;
+        ctx->pending_resp = NULL;
+        g_free(sr->header);
+        g_free(sr->iov);
+        for (unsigned int i = 0; i < sr->n_in_sg; i++) {
+            free(sr->in_bufs[i]);
+        }
+        g_free(sr->in_bufs);
+        g_free(sr);
     }
     g_hash_table_remove(stub_recv_states, GINT_TO_POINTER(fd));
     g_free(rs);
@@ -1068,11 +1573,6 @@ conn_err:
     ctx->resp_fd = -1;
 }
 
-/*
- * called by remote stub: parse ip@port, create a listening socket and return
- * its fd. The actual accept() is done asynchronously in remote_accept_handler
- * once the fd becomes readable (i.e. local qemu connects).
- */
 int remote_accept(const char *ip_port, Error **errp)
 {
     // parse "ip@port"
@@ -1092,6 +1592,7 @@ int remote_accept(const char *ip_port, Error **errp)
     ip[ip_len] = '\0';
     port = atoi(at_pos + 1);
 
+    // create socket with ip and port
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -1119,11 +1620,6 @@ int remote_accept(const char *ip_port, Error **errp)
 }
 
 /*
- * aio fd handler on the stub side: runs on the iothread when the listen fd
- * becomes readable. Accepts the control connection from local qemu, then
- * negotiates the per-vq ports with it (message format aligned with
- * local_connect_socket), finally accepts and registers the vq connections.
- *
  * Note: this runs once per device during initialization, so the blocking
  * reads/accepts here are acceptable; the data path itself stays async.
  */
@@ -1244,6 +1740,7 @@ void remote_accept_handler(void *opaque)
         ctx->resp_fd = vq_fd;
         ctx->vq_nr = n;
         ctx->aio_ctx = sctx->aio_ctx;
+        zc_enable(vq_fd);
         aio_set_fd_handler(sctx->aio_ctx, vq_fd,
                            remote_stub_req_handler, NULL, NULL, NULL, vq);
         vq_idx++;

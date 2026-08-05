@@ -4407,7 +4407,11 @@ void virtio_device_release_ioeventfd(VirtIODevice *vdev)
 static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 {
     // 1. create aio iothread
-    g_autofree char *iothread_id = g_strdup_printf(DEVICE(obj)->id, obj);
+    // device state has no id; fall back to the device's path component
+    // (e.g. "virtio0"), which is non-NULL and unique per device
+    const char *dev_name = DEVICE(obj)->id ?
+        DEVICE(obj)->id : object_get_canonical_path_component(obj);
+    g_autofree char *iothread_id = g_strdup_printf("remote-%s-iothread", dev_name);
     IOThread *iothread = iothread_create(iothread_id, errp);
     if (!iothread) {
         return;
@@ -4440,19 +4444,21 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
         if (!vq->remote_ctx) {
             vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
         }
+        RemoteVQueueCtx *ctx = vq->remote_ctx;
+        ctx->aio_ctx = aio_ctx;
 
         // one TCP connection per vq, tagged with its vq_nr
         if (!local_connect_vq(sockets[vq_idx], &dst[vq_idx], errp)) {
             goto fail;
         }
-        vq->remote_ctx->resp_fd = sockets[vq_idx];
+        ctx->resp_fd = sockets[vq_idx];
 
         // 3. set socket_fd to aio iothread
-        int flags = fcntl(vq->remote_ctx->resp_fd, F_GETFL, 0);
+        int flags = fcntl(ctx->resp_fd, F_GETFL, 0);
         if (flags >= 0) {
-            fcntl(vq->remote_ctx->resp_fd, F_SETFL, flags | O_NONBLOCK);
+            fcntl(ctx->resp_fd, F_SETFL, flags | O_NONBLOCK);
         }
-        aio_set_fd_handler(aio_ctx, vq->remote_ctx->resp_fd,
+        aio_set_fd_handler(aio_ctx, ctx->resp_fd,
                            local_response_handler, NULL, NULL, NULL,
                            vq);
         vq_idx++;
@@ -4495,7 +4501,11 @@ done:
 static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error **errp)
 {
     // 1. create aio iothread
-    g_autofree char *iothread_id = g_strdup_printf(DEVICE(obj)->id, obj);
+    // device state has no id; fall back to the device's path component
+    // (e.g. "virtio0"), which is non-NULL and unique per device
+    const char *dev_name = DEVICE(obj)->id ?
+        DEVICE(obj)->id : object_get_canonical_path_component(obj);
+    g_autofree char *iothread_id = g_strdup_printf("remote-%s-iothread", dev_name);
     IOThread *iothread = iothread_create(iothread_id, errp);
     if (!iothread) {
         return;
@@ -4520,12 +4530,9 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     aio_set_fd_handler(aio_ctx, socket_fd,
                        remote_accept_handler, NULL, NULL, NULL,
                        rctx);
-}
-
-// cmsvm: called via qdev_monitor, obj is "virtio-x-pci"
-static void virtio_device_set_remote_id(Object *obj, const char *id, Error **errp)
-{
-    remote_register_id(obj, id, errp);
+    
+    // 3. register global tables
+    register_mosaic(VIRTIO_DEVICE(obj));
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
@@ -4547,9 +4554,6 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
     // set by remote stub
     object_class_property_add_str(klass, "remote-stub",
                                   NULL, virtio_device_set_remote_stub);
-    // mosaic old: todo
-    object_class_property_add_str(klass, "remote-id",
-                                  NULL, virtio_device_set_remote_id);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }
