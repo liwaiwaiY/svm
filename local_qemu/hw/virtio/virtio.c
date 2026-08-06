@@ -2106,7 +2106,7 @@ err_undo_map:
 
 void *virtqueue_pop(VirtQueue *vq, size_t sz)
 {
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub in
+    if (check_env(VIRTIO_REMOTE_ENV)) {
         return remote_stub_virtqueue_pop(vq, sz);
     }
 
@@ -2575,6 +2575,7 @@ void virtio_queue_set_shadow_avail_idx(VirtQueue *vq, uint16_t shadow_avail_idx)
     }
 }
 
+// cmsvm
 static void virtio_queue_notify_vq(VirtQueue *vq)
 {
     if (vq->vring.desc && vq->handle_output) {
@@ -2585,7 +2586,12 @@ static void virtio_queue_notify_vq(VirtQueue *vq)
         }
 
         trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
-        vq->handle_output(vdev, vq);
+
+        // cmsvm
+        if (vq->remote_ctx)
+            local_handle_output(vq);
+        else
+            vq->handle_output(vdev, vq);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
@@ -4019,24 +4025,10 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
         virtio_queue_set_notification(vq, 1);
     }
 
-    // cmsvm
-    void (*cb1)(EventNotifier *n);
-    void (*cb2)(EventNotifier *n);
-    cb1 = NULL;
-    cb2 = NULL;
-    if (unlikely(check_virtio_device_remote(vq->vdev))) {
-        cb1 = remote_virtio_queue_host_notifier_read;
-        cb2 = remote_virtio_queue_host_notifier_aio_poll_ready;
-        remote_virtio_register_aio(vq->vdev);
-    } else {
-        cb1 = virtio_queue_host_notifier_read;
-        cb2 = virtio_queue_host_notifier_aio_poll_ready;
-    }
-
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           cb1,
+                           virtio_queue_host_notifier_read,
                            virtio_queue_host_notifier_aio_poll,
-                           cb2);
+                           virtio_queue_host_notifier_aio_poll_ready);
     aio_set_event_notifier_poll(ctx, &vq->host_notifier,
                                 virtio_queue_host_notifier_aio_poll_begin,
                                 virtio_queue_host_notifier_aio_poll_end);
@@ -4102,15 +4094,6 @@ void virtio_queue_aio_detach_host_notifier(VirtQueue *vq, AioContext *ctx)
 }
 
 void virtio_queue_host_notifier_read(EventNotifier *n)
-{
-    VirtQueue *vq = container_of(n, VirtQueue, host_notifier);
-    if (event_notifier_test_and_clear(n)) {
-        virtio_queue_notify_vq(vq);
-    }
-}
-
-// cmsvm
-void virtio_queue_host_notifier_read_local(EventNotifier *n)
 {
     VirtQueue *vq = container_of(n, VirtQueue, host_notifier);
     if (event_notifier_test_and_clear(n)) {
@@ -4466,6 +4449,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     // 4. register glocal tables
     register_mosaic(vdev);
     register_aio_ctx(vdev, aio_ctx);
+    chenv(VIRTIO_LOCAL_ENV);
 
     goto done;
 
@@ -4497,11 +4481,9 @@ done:
 }
 
 // cmsvm: called in remote stub, obj is "virtio-x-pci"
-static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Error **errp)
+static void remote_set_server(Object *obj, const char *ip_port, Error **errp)
 {
     // 1. create aio iothread
-    // device state has no id; fall back to the device's path component
-    // (e.g. "virtio0"), which is non-NULL and unique per device
     const char *dev_name = DEVICE(obj)->id ?
         DEVICE(obj)->id : object_get_canonical_path_component(obj);
     g_autofree char *iothread_id = g_strdup_printf("remote-%s-iothread", dev_name);
@@ -4509,7 +4491,6 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     if (!iothread) {
         return;
     }
-    /* iothread's aio ctx defaults to poll_max_ns=32768; disable busy poll */
     AioContext *aio_ctx = iothread_get_aio_context(iothread);
     aio_context_set_poll_params(aio_ctx, 0, 0, 0, errp);
 
@@ -4533,6 +4514,7 @@ static void virtio_device_set_remote_stub(Object *obj, const char *ip_port, Erro
     // 3. register global tables
     register_mosaic(VIRTIO_DEVICE(obj));
     register_aio_ctx(VIRTIO_DEVICE(obj), aio_ctx);
+    chenv(VIRTIO_REMOTE_ENV);
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
@@ -4553,7 +4535,7 @@ static void virtio_device_class_init(ObjectClass *klass, const void *data)
                                   NULL, local_set_remote);
     // set by remote stub
     object_class_property_add_str(klass, "remote-stub",
-                                  NULL, virtio_device_set_remote_stub);
+                                  NULL, remote_set_server);
 
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 }

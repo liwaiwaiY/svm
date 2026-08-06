@@ -45,6 +45,8 @@
 #include <linux/errqueue.h>
 #include <stdbool.h>
 
+/* -------------- Device State ------------- */
+
 static GHashTable *mosaic;
 
 void register_mosaic(VirtIODevice *vdev)
@@ -60,6 +62,8 @@ bool is_mosaic(VirtIODevice *vdev)
            g_hash_table_lookup(mosaic, vdev);
 }
 
+/* -------------- Aio Contexts ------------- */
+
 static GHashTable *aio_ctxs;
 
 void register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx)
@@ -73,6 +77,13 @@ AioContext * local_search_aio_ctx(VirtIODevice *vdev)
 {
     return aio_ctxs ? g_hash_table_lookup(aio_ctxs, vdev) : NULL;
 }
+
+static AioContext *vq_get_aio_ctx(VirtQueue *vq)
+{
+    return local_search_aio_ctx(virtqueue_get_vdev(vq));
+}
+
+/* -------------- VIRTIO Interception ------------- */
 
 /* true if any active vq of vdev carries a remote ctx: this process is the
  * remote stub for vdev (the local qemu side is marked by register_mosaic) */
@@ -93,6 +104,16 @@ bool remote_virtio_queue_empty(void *opaque)
     return ctx->elem != NULL; /* popped once but not pushed yet */
 }
 
+/*
+ * deferred notification: defer_call() coalesces a batch of completed
+ * responses into a single virtio_notify per vq per aio event
+ */
+static void local_virtio_notify(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    virtio_notify(virtqueue_get_vdev(vq), vq);
+}
+
 bool remote_virtio_notify_skip(VirtIODevice *vdev)
 {
     /* the stub process has no guest to deliver the config interrupt to */
@@ -111,61 +132,48 @@ bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
     return local_search_aio_ctx(vdev) != NULL;
 }
 
-/*
- * legacy property "remote-id": keep the device id; per-device remote marking
- * now lives in register_mosaic()
- */
-void remote_register_id(Object *obj, const char *id, Error **errp)
-{
-    if (id) {
-        DEVICE(obj)->id = g_strdup(id);
-    } else if (!DEVICE(obj)->id) {
-        static int remote_seq;
-        DEVICE(obj)->id = g_strdup_printf("remote%d", remote_seq++);
-    }
-}
-
-/*
- * legacy: the stub keeps no guest, so its vq host notifiers are never kicked;
- * the request path is driven entirely by the per-vq TCP sockets
- */
-void remote_virtio_register_aio(VirtIODevice *vdev)
-{
-}
-
-void remote_virtio_queue_host_notifier_read(EventNotifier *n)
-{
-    event_notifier_test_and_clear(n);
-}
-
-void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n)
-{
-}
-
-/*
- * called by virtio_device_stop_ioeventfd_impl on the stub side: release the
- * vq host notifiers (never kicked by a guest, but must be cleaned up)
- */
 void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
 {
-    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
+}
+
+int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx)
+{
+    int i, r;
     memory_region_transaction_begin();
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
             continue;
+        r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, true);
+        if (r != 0) {
+            fprintf(stderr, "virtio-blk failed to set host notifier (%d)\n", r);
+            goto assign_err;
         }
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        event_notifier_set_handler(virtqueue_get_host_notifier(vq), NULL);
-        virtio_bus_set_host_notifier(qbus, n, false);
     }
     memory_region_transaction_commit();
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        if (!virtio_queue_get_num(vdev, n)) {
+    AioContext *ctx = local_search_aio_ctx(vdev);
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        VirtQueue *vq = virtio_get_queue(vdev, i);
+        virtio_queue_aio_attach_host_notifier(vq, ctx);
+    }
+
+    return;
+
+assign_err:
+    memory_region_transaction_commit();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
             continue;
-        }
-        virtio_bus_cleanup_host_notifier(qbus, n);
+        virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, false);
+    }
+    memory_region_transaction_commit();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
+            continue;
+        virtio_bus_cleanup_host_notifier(VIRTIO_BUS(qbus), i);
     }
 }
+
+/* -------------- Zero Copy Infra ------------- */
 
 /* in-flight elems awaiting their responses, keyed by (resp_fd, seq) */
 static GHashTable *pending_elems;
@@ -216,6 +224,12 @@ typedef struct ZcFdState {
 
 static GHashTable *zc_fds;    /* resp_fd -> ZcFdState */
 
+/* key for an in-flight element: (resp_fd, seq) -> VirtQueueElement */
+static gpointer pending_key(int resp_fd, unsigned int seq)
+{
+    return (gpointer)(uintptr_t)(((guint64)(unsigned)resp_fd << 32) | seq);
+}
+
 static ZcFdState *zc_fd_state(int fd)
 {
     if (!zc_fds) {
@@ -255,18 +269,12 @@ static bool zc_pending_has_elem(int fd, VirtQueueElement *elem)
     return false;
 }
 
-/* defined after the zc section; used by zc_complete_one() below */
-static gpointer pending_key(int resp_fd, unsigned int seq);
-static void local_virtio_notify(void *opaque);
-
 /*
- * one zc send has completed: the network stack no longer references the
- * sent buffers, so they can be released / handed back to the guest.
- * Returns true if zp was fully consumed (freed); false if it must stay in
- * the pending list (local side: the response has not arrived yet).
- */
+* local and remote use the same function
+*/
 static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
 {
+    // free buffers for the first time
     if (zp->bufs) {
         for (unsigned int i = 0; i < zp->n_bufs; i++) {
             if (zp->bufs[i]) {
@@ -277,17 +285,13 @@ static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
         zp->bufs = NULL;
     }
 
+    // local: in-flight elem, successing send, waiting resp
     if (zp->elem && !zp->len_known) {
-        /* local side, completion first: the response is still in flight.
-         * Keep zp so the response handler can finish the push when the
-         * data arrives (it will find bufs == NULL and push right away). */
         return false;
     }
 
+    // local: resp arrives
     if (zp->elem) {
-        /* local side: the NIC is done with the guest's out buffers, so the
-         * used-ring entry can now be pushed (both the completion and the
-         * response have arrived) */
         virtqueue_push(zp->vq, zp->elem, zp->push_len);
         if (pending_elems) {
             g_hash_table_remove(pending_elems, pending_key(fd, zp->seq));
@@ -295,6 +299,8 @@ static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
         defer_call(local_virtio_notify, zp->vq);
         g_free(zp->elem);
     }
+
+    // local, remote: free zp
     g_free(zp);
     return true;
 }
@@ -388,6 +394,8 @@ static void zc_fd_teardown(int fd)
     g_hash_table_remove(zc_fds, GINT_TO_POINTER(fd));
     g_free(st);
 }
+
+/* -------------- Local QEMU ------------- */
 
 // enable socket keepalive in kernel, ~55s maximum link down detection
 static void enable_tcp_keepalive(int fd)
@@ -655,90 +663,27 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
     return true;
 }
 
-int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx)
-{
-    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
-    int i, n, r, err;
-    memory_region_transaction_begin();
-    // todo: wrong index
-    // todo: think about multi queue
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (!virtio_queue_get_num(vdev, n)) {
-            continue;
-        }
-        r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, true);
-        if (r != 0) {
-            int j = i;
-            fprintf(stderr, "virtio-blk failed to set host notifier (%d)\n", r);
-            while (i--) {
-                virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, false);
-            }
-            /*
-             * The transaction expects the ioeventfds to be open when it
-             * commits. Do it now, before the cleanup loop.
-             */
-            memory_region_transaction_commit();
-            while (j--) {
-                virtio_bus_cleanup_host_notifier(VIRTIO_BUS(qbus), j);
-            }
-            goto assign_err;
-        }
-    }
-
-    memory_region_transaction_commit();
-    for (uint16_t i = 0; i < s->conf.num_queues; i++) {
-        VirtQueue *vq = virtio_get_queue(vdev, i);
-        virtio_queue_aio_attach_host_notifier(vq, s->vq_aio_context[i]);
-    }
-}
-
-/* key for an in-flight element: (resp_fd, seq) -> VirtQueueElement */
-static gpointer pending_key(int resp_fd, unsigned int seq)
-{
-    return (gpointer)(uintptr_t)(((guint64)(unsigned)resp_fd << 32) | seq);
-}
-
-/*
- * deferred notification: defer_call() coalesces a batch of completed
- * responses into a single virtio_notify per vq per aio event
- */
-static void local_virtio_notify(void *opaque)
+/* io_write handler: the socket has send buffer space again, so retry the
+ * deferred elem; once it is out, drop the write handler and drain the vq */
+static void local_retry_send(void *opaque)
 {
     VirtQueue *vq = opaque;
-    virtio_notify(virtqueue_get_vdev(vq), vq);
-}
-
-/*
- * per-connection receive state for incremental, non-blocking reads of the
- * resp stream [vq_nr(4B)][elem_index(4B)][data_len(4B)][data...]
- */
-typedef struct LocalRecvState {
-    int stage;            /* 0 = reading header, 1 = reading data */
-    unsigned int hdr_off; /* header bytes read so far */
-    uint8_t hdr[12];      /* partial header */
-    VirtQueueElement *cur;    /* elem whose data is being received */
-    unsigned int cur_seq; /* seq of the current response */
-    unsigned int cur_off; /* data bytes already written into in_sg */
-    unsigned int need_len;    /* total data bytes expected */
-} LocalRecvState;
-
-/*
- * called by local qemu: submit one already-popped element to the stub as
- * soon as possible. Non-blocking sendmsg only - never waits for a response,
- * so the aio loop is never stalled. The element is handed over to the
- * response path which will virtqueue_push() it.
- * Returns false if the socket send buffer is full (caller stops draining).
- */
-
-/* retry a deferred elem once the socket is writable again */
-static void local_retry_send(void *opaque);
-
-/* the aio ctx of a vq's socket is owned by the vdev (one iothread per
- * vdev): look it up in the vdev-level table instead of duplicating the
- * pointer per vq. Only reached on the rare EAGAIN/connection-error paths. */
-static AioContext *vq_get_aio_ctx(VirtQueue *vq)
-{
-    return local_search_aio_ctx(virtqueue_get_vdev(vq));
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    VirtQueueElement *elem = ctx->pending_elem;
+    if (elem) {
+        ctx->pending_elem = NULL;
+        if (!local_send_msg(vq, elem)) {
+            /* still full: keep waiting for the next writable event */
+            ctx->pending_elem = elem;
+            return;
+        }
+    }
+    AioContext *ctx_aio = vq_get_aio_ctx(vq);
+    if (ctx_aio) {
+        aio_set_fd_handler(ctx_aio, ctx->resp_fd,
+                           local_response_handler, NULL, NULL, NULL, vq);
+    }
+    local_handle_output(vq);
 }
 
 static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
@@ -756,10 +701,12 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
     header[1] = seq;
     header[2] = elem->out_num;
     header[3] = elem->in_num;
+    ssize_t total = 0;
 
     int *lens = g_new0(int, elem->out_num + elem->in_num);
     for (unsigned int i = 0; i < elem->out_num; i++) {
         lens[i] = elem->out_sg[i].iov_len;
+        total += lens[i];
     }
     for (unsigned int i = 0; i < elem->in_num; i++) {
         lens[i + elem->out_num] = elem->in_sg[i].iov_len;
@@ -770,16 +717,12 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
     msg_sg[1].iov_base = lens;
     msg_sg[1].iov_len = (elem->out_num + elem->in_num) * sizeof(int);
     memcpy(msg_sg + 2, elem->out_sg, elem->out_num * sizeof(iovec));
+    total += msg_sg[0].iov_len + msg_sg[1].iov_len;
 
     struct msghdr msg = {
         .msg_iov = msg_sg,
         .msg_iovlen = elem->out_num + 2,
     };
-
-    ssize_t total = msg_sg[0].iov_len + msg_sg[1].iov_len;
-    for (unsigned int i = 0; i < elem->out_num; i++) {
-        total += elem->out_sg[i].iov_len;
-    }
 
     /*
      * Try MSG_ZEROCOPY for large requests: the NIC DMA's the out buffers
@@ -879,7 +822,7 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
     return true;
 }
 
-static void local_handle_output(VirtQueue *vq)
+void local_handle_output(VirtQueue *vq)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     if (!ctx || ctx->pending_elem) {
@@ -901,47 +844,19 @@ static void local_handle_output(VirtQueue *vq)
     }
 }
 
-/* io_write handler: the socket has send buffer space again, so retry the
- * deferred elem; once it is out, drop the write handler and drain the vq */
-static void local_retry_send(void *opaque)
-{
-    VirtQueue *vq = opaque;
-    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    VirtQueueElement *elem = ctx->pending_elem;
-    if (elem) {
-        ctx->pending_elem = NULL;
-        if (!local_send_msg(vq, elem)) {
-            /* still full: keep waiting for the next writable event */
-            ctx->pending_elem = elem;
-            return;
-        }
-    }
-    AioContext *ctx_aio = vq_get_aio_ctx(vq);
-    if (ctx_aio) {
-        aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                           local_response_handler, NULL, NULL, NULL, vq);
-    }
-    local_handle_output(vq);
-}
-
-void local_host_notifier_read(EventNotifier *n)
-{
-    VirtQueue *vq = host_notifier_to_vq(n);
-    if (!event_notifier_test_and_clear(n)) {
-        return;
-    }
-    VirtIODevice *vdev = virtqueue_get_vdev(vq);
-    if (unlikely(vdev->broken)) {
-        return;
-    }
-    if (!virtqueue_get_vring_desc(vq) || !virtqueue_get_handle_output(vq)) {
-        return;
-    }
-    local_handle_output(vq);
-    if (unlikely(vdev->start_on_kick)) {
-        virtio_set_started(vdev, true);
-    }
-}
+/*
+ * per-connection receive state for incremental, non-blocking reads of the
+ * resp stream [vq_nr(4B)][elem_index(4B)][data_len(4B)][data...]
+ */
+typedef struct LocalRecvState {
+    int stage;            /* 0 = reading header, 1 = reading data */
+    unsigned int hdr_off; /* header bytes read so far */
+    uint8_t hdr[12];      /* partial header */
+    VirtQueueElement *cur;    /* elem whose data is being received */
+    unsigned int cur_seq; /* seq of the current response */
+    unsigned int cur_off; /* data bytes already written into in_sg */
+    unsigned int need_len;    /* total data bytes expected */
+} LocalRecvState;
 
 void local_response_handler(void *opaque)
 {
@@ -1006,13 +921,9 @@ void local_response_handler(void *opaque)
         if (rs->stage == 1) {
             VirtQueueElement *elem = rs->cur;
             if (rs->cur_off >= rs->need_len) {
-                /* response complete: return the elem to the used ring. If it
-                 * was sent with MSG_ZEROCOPY, the guest may not reuse its
-                 * out buffers until the NIC is done (zc completion), so
-                 * defer the push until the completion has arrived. */
                 ZcFdState *st = zc_fd_state_find(fd);
                 ZcPending *zp = NULL;
-                if (st) {
+                if (st) { // fd has used zc
                     for (GSList *it = st->pending; it; it = it->next) {
                         ZcPending *p = it->data;
                         if (p->elem == elem) {
@@ -1021,17 +932,10 @@ void local_response_handler(void *opaque)
                         }
                     }
                 }
-                if (zp) {
+                if (zp) { // this elem sused zc
                     zp->push_len = rs->need_len;
                     zp->len_known = true;
-                    /*
-                     * If the zc completion already ran, the send buffers
-                     * are released (zp->bufs == NULL) and we only need to
-                     * push. Otherwise keep the elem here until zc_drain()
-                     * runs (the completion for this send also ends up in
-                     * the error queue and wakes this handler via POLLERR).
-                     */
-                    if (!zp->bufs) {
+                    if (!zp->bufs) { // zc has completed by zc_complete_one()
                         st->pending = g_slist_remove(st->pending, zp);
                         virtqueue_push(vq, elem, rs->need_len);
                         g_hash_table_remove(pending_elems,
@@ -1039,10 +943,8 @@ void local_response_handler(void *opaque)
                         defer_call(local_virtio_notify, vq);
                         g_free(elem);
                         g_free(zp);
-                    }
-                    /* else: completion still pending; keep the elem, the
-                     * used-ring push happens in zc_drain() */
-                } else {
+                    } /* else {} wait zc_complete_one() to handle */
+                } else { // this elem is sent by copy
                     virtqueue_push(vq, elem, rs->need_len);
                     g_hash_table_remove(pending_elems,
                                         pending_key(fd, rs->cur_seq));
@@ -1119,6 +1021,8 @@ conn_err:
     rs->need_len = 0;
 }
 
+/* -------------- Remote Stub ------------- */
+
 /*
  * allocate a VirtQueueElement with room for out_num/in_num sg entries.
  * out_addr/in_addr are kept zeroed so the stub never tries to dma_unmap them.
@@ -1146,12 +1050,6 @@ static VirtQueueElement *remote_stub_virtqueue_alloc_element(size_t sz,
     return elem;
 }
 
-/*
- * called by virtio.c through virtqueue_pop() when vq->remote_ctx is set
- * (remote stub side). Reconstructs one VirtQueueElement from the request
- * buffered in the ctx by remote_stub_req_handler. Exactly one element is
- * delivered per received request, so a second pop returns NULL.
- */
 void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
@@ -1509,7 +1407,7 @@ static void remote_stub_req_handler(void *opaque)
                         break;
                     }
                     off += rs->out_sg[i].iov_len;
-                }
+                } 
                 unsigned int iov_off = rs->data_off - off;
                 ssize_t n = recv(fd, (char *)rs->out_sg[i].iov_base + iov_off,
                                  rs->out_sg[i].iov_len - iov_off, 0);
@@ -1651,10 +1549,6 @@ int remote_accept(const char *ip_port, Error **errp)
     return listen_fd;
 }
 
-/*
- * Note: this runs once per device during initialization, so the blocking
- * reads/accepts here are acceptable; the data path itself stays async.
- */
 void remote_accept_handler(void *opaque)
 {
     RemoteAccept *sctx = opaque;

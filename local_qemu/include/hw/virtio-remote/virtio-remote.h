@@ -58,6 +58,27 @@ void register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx);
 */
 AioContext * local_search_aio_ctx(VirtIODevice *vdev);
 
+#define VIRTIO_LOCAL_ENV 0
+#define VIRTIO_REMOTE_ENV 1
+
+static int env_tag;
+
+/*
+* called in local qemu and remote
+* to chmod of env
+*/
+void chenv(int new_env)
+{
+    if (new_env != VIRTIO_LOCAL_ENV && new_env != VIRTIO_REMOTE_ENV)
+        return;
+    env_tag = new_env;
+}
+
+int check_env(int tar_env)
+{
+    return env_tag == tar_env;
+}
+
 /*
 * called by local qemu in property setter ("remote-machine")
 * negotiate per-vq ports with the remote stub over a control connection.
@@ -84,16 +105,10 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
 
 /*
-* called by local qemu in ioevent, registed in ioeventfd_impl
-* handle msg in the vq, and send it to remote
+* called by local qemu in virtio_queue_notify_vq
+* handle notifier kick
 */
-void local_host_notifier_read(EventNotifier *n);
-
-/*
-* called by local qemu in aio iothread, registerd in property setter ("remote-machine")
-* local qemu handle responses with opaque as VirtQueue *
-*/
-void local_response_handler(void *opaque);
+void local_handle_output(VirtQueue *vq);
 
 /*
 * used in remote stub in accept handler
@@ -156,19 +171,6 @@ bool check_virtio_device_remote(VirtIODevice *vdev);
 */
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
 
-/*
-* legacy property "remote-id": keep the device id
-*/
-void remote_register_id(Object *obj, const char *id, Error **errp);
-
-/*
-* legacy stub-side host notifier hooks: the stub has no guest to kick its
-* vqs, so these are inert
-*/
-void remote_virtio_register_aio(VirtIODevice *vdev);
-void remote_virtio_queue_host_notifier_read(EventNotifier *n);
-void remote_virtio_queue_host_notifier_aio_poll_ready(EventNotifier *n);
-void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 
 
 #endif /* VIRTIO_REMOTE */
