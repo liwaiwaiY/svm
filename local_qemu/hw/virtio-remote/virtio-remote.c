@@ -22,6 +22,8 @@
 #include "system/memory.h"
 #include "system/runstate.h"
 #include "qemu/aio.h"
+#include "qemu/thread.h"
+#include "qemu/rcu.h"
 
 #include "standard-headers/linux/virtio_ids.h"
 #include "standard-headers/linux/vhost_types.h"
@@ -45,7 +47,7 @@
 #include <linux/errqueue.h>
 #include <stdbool.h>
 
-/* -------------- Device State ------------- */
+/* -------------- Device States ------------- */
 
 static GHashTable *mosaic;
 
@@ -83,103 +85,7 @@ static AioContext *vq_get_aio_ctx(VirtQueue *vq)
     return local_search_aio_ctx(virtqueue_get_vdev(vq));
 }
 
-/* -------------- VIRTIO Interception ------------- */
-
-/* true if any active vq of vdev carries a remote ctx: this process is the
- * remote stub for vdev (the local qemu side is marked by register_mosaic) */
-static bool stub_vdev_has_remote_vq(VirtIODevice *vdev)
-{
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (virtio_queue_get_num(vdev, n) && virtqueue_get_remote_ctx(vq)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool remote_virtio_queue_empty(void *opaque)
-{
-    RemoteVQueueCtx *ctx = opaque;
-    return ctx->elem != NULL; /* popped once but not pushed yet */
-}
-
-/*
- * deferred notification: defer_call() coalesces a batch of completed
- * responses into a single virtio_notify per vq per aio event
- */
-static void local_virtio_notify(void *opaque)
-{
-    VirtQueue *vq = opaque;
-    virtio_notify(virtqueue_get_vdev(vq), vq);
-}
-
-bool remote_virtio_notify_skip(VirtIODevice *vdev)
-{
-    /* the stub process has no guest to deliver the config interrupt to */
-    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
-}
-
-bool check_virtio_device_remote(VirtIODevice *vdev)
-{
-    /* the local qemu side is marked by register_mosaic; only the stub
-     * process (no mosaic marking) dispatches through the remote stubs */
-    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
-}
-
-bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
-{
-    return local_search_aio_ctx(vdev) != NULL;
-}
-
-void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
-{
-}
-
-int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx)
-{
-    int i, r;
-    memory_region_transaction_begin();
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (!virtio_queue_get_num(vdev, i))
-            continue;
-        r = virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, true);
-        if (r != 0) {
-            fprintf(stderr, "virtio-blk failed to set host notifier (%d)\n", r);
-            goto assign_err;
-        }
-    }
-    memory_region_transaction_commit();
-    AioContext *ctx = local_search_aio_ctx(vdev);
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        VirtQueue *vq = virtio_get_queue(vdev, i);
-        virtio_queue_aio_attach_host_notifier(vq, ctx);
-    }
-
-    return;
-
-assign_err:
-    memory_region_transaction_commit();
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (!virtio_queue_get_num(vdev, i))
-            continue;
-        virtio_bus_set_host_notifier(VIRTIO_BUS(qbus), i, false);
-    }
-    memory_region_transaction_commit();
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (!virtio_queue_get_num(vdev, i))
-            continue;
-        virtio_bus_cleanup_host_notifier(VIRTIO_BUS(qbus), i);
-    }
-}
-
 /* -------------- Zero Copy Infra ------------- */
-
-/* in-flight elems awaiting their responses, keyed by (resp_fd, seq) */
-static GHashTable *pending_elems;
-
-/* per-connection incremental receive state, keyed by resp_fd */
-static GHashTable *recv_states;
 
 /* stub-side per-connection incremental request receive state, keyed by fd */
 static GHashTable *stub_recv_states;
@@ -222,42 +128,61 @@ typedef struct ZcFdState {
     GSList *pending;          /* ZcPending, matched by serial */
 } ZcFdState;
 
-static GHashTable *zc_fds;    /* resp_fd -> ZcFdState */
+/* per-vq in-flight element record (local side), matched by the resp seq */
+typedef struct PendingElem {
+    unsigned int seq;
+    VirtQueueElement *elem;
+} PendingElem;
 
-/* key for an in-flight element: (resp_fd, seq) -> VirtQueueElement */
-static gpointer pending_key(int resp_fd, unsigned int seq)
+/*
+ * The per-vq state (RemoteVQueueCtx) carries the resp recv state, the
+ * in-flight elem queue and the MSG_ZEROCOPY state instead of the old global
+ * hash tables: the distributor looks them up once and hands them to the resp
+ * worker, so no cross-vq table races exist.
+ */
+
+/* look up an in-flight elem by seq; caller holds ctx->lock */
+static VirtQueueElement *pending_lookup(RemoteVQueueCtx *ctx, unsigned int seq)
 {
-    return (gpointer)(uintptr_t)(((guint64)(unsigned)resp_fd << 32) | seq);
+    for (GList *it = ctx->pending.head; it; it = it->next) {
+        PendingElem *pe = it->data;
+        if (pe->seq == seq) {
+            return pe->elem;
+        }
+    }
+    return NULL;
 }
 
-static ZcFdState *zc_fd_state(int fd)
+/* remove an in-flight elem by seq; caller holds ctx->lock */
+static void pending_remove(RemoteVQueueCtx *ctx, unsigned int seq)
 {
-    if (!zc_fds) {
-        zc_fds = g_hash_table_new(g_direct_hash, g_direct_equal);
+    for (GList *it = ctx->pending.head; it; it = it->next) {
+        PendingElem *pe = it->data;
+        if (pe->seq == seq) {
+            g_queue_delete_link(&ctx->pending, it);
+            g_free(pe);
+            return;
+        }
     }
-    ZcFdState *st = g_hash_table_lookup(zc_fds, GINT_TO_POINTER(fd));
-    if (!st) {
-        st = g_new0(ZcFdState, 1);
-        g_hash_table_insert(zc_fds, GINT_TO_POINTER(fd), st);
-    }
+}
+
+/*
+ * Enable MSG_ZEROCOPY on fd and return the per-vq zc state. Not registered in
+ * any global table: the state is owned by the vq's RemoteVQueueCtx, so the
+ * socket iothread (sender) and the resp worker (zc completions) are the only
+ * two owners and are serialized by ctx->lock.
+ */
+static ZcFdState *zc_enable(int fd)
+{
+    ZcFdState *st = g_new0(ZcFdState, 1);
+    int one = 1;
+    st->enabled = setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &one, sizeof(one)) == 0;
     return st;
 }
 
-static ZcFdState *zc_fd_state_find(int fd)
+static bool zc_pending_has_elem(RemoteVQueueCtx *ctx, VirtQueueElement *elem)
 {
-    return zc_fds ? g_hash_table_lookup(zc_fds, GINT_TO_POINTER(fd)) : NULL;
-}
-
-static void zc_enable(int fd)
-{
-    int one = 1;
-    ZcFdState *st = zc_fd_state(fd);
-    st->enabled = setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, &one, sizeof(one)) == 0;
-}
-
-static bool zc_pending_has_elem(int fd, VirtQueueElement *elem)
-{
-    ZcFdState *st = zc_fd_state_find(fd);
+    ZcFdState *st = ctx->zc;
     if (!st) {
         return false;
     }
@@ -271,8 +196,9 @@ static bool zc_pending_has_elem(int fd, VirtQueueElement *elem)
 
 /*
 * local and remote use the same function
+* caller holds ctx->lock
 */
-static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
+static bool zc_complete_one(RemoteVQueueCtx *ctx, ZcPending *zp)
 {
     // free buffers for the first time
     if (zp->bufs) {
@@ -292,11 +218,10 @@ static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
 
     // local: resp arrives
     if (zp->elem) {
-        virtqueue_push(zp->vq, zp->elem, zp->push_len);
-        if (pending_elems) {
-            g_hash_table_remove(pending_elems, pending_key(fd, zp->seq));
-        }
-        defer_call(local_virtio_notify, zp->vq);
+        VirtQueue *vq = zp->vq;
+        virtqueue_push(vq, zp->elem, zp->push_len);
+        pending_remove(ctx, zp->seq);
+        virtio_notify(virtqueue_get_vdev(vq), vq);
         g_free(zp->elem);
     }
 
@@ -309,12 +234,13 @@ static bool zc_complete_one(ZcFdState *st, ZcPending *zp, int fd)
  * drain the socket error queue: each entry is a completion notification for
  * the zc sends whose serial is in [ee_info, ee_data] (inclusive, may wrap)
  */
-static void zc_drain(int fd)
+static void zc_drain(RemoteVQueueCtx *ctx)
 {
-    ZcFdState *st = zc_fd_state_find(fd);
+    ZcFdState *st = ctx->zc;
     if (!st) {
         return;
     }
+    g_mutex_lock(&ctx->lock);
     char ctrl[CMSG_SPACE(sizeof(struct sock_extended_err)) * 16];
     char data[128];
     for (;;) {
@@ -324,7 +250,7 @@ static void zc_drain(int fd)
         m.msg_iovlen = 1;
         m.msg_control = ctrl;
         m.msg_controllen = sizeof(ctrl);
-        ssize_t n = recvmsg(fd, &m, MSG_ERRQUEUE);
+        ssize_t n = recvmsg(ctx->resp_fd, &m, MSG_ERRQUEUE);
         if (n < 0) {
             break; /* EAGAIN: error queue drained */
         }
@@ -353,7 +279,7 @@ static void zc_drain(int fd)
                      * local-side response is still in flight and the response
                      * handler needs to find zp to finish the push */
                     st->pending = g_slist_delete_link(st->pending, it);
-                    if (!zc_complete_one(st, zp, fd)) {
+                    if (!zc_complete_one(ctx, zp)) {
                         st->pending = g_slist_prepend(st->pending, zp);
                     }
                 }
@@ -361,15 +287,17 @@ static void zc_drain(int fd)
             }
         }
     }
+    g_mutex_unlock(&ctx->lock);
 }
 
 /* connection torn down: release every zc send still in flight */
-static void zc_fd_teardown(int fd)
+static void zc_fd_teardown(RemoteVQueueCtx *ctx)
 {
-    ZcFdState *st = zc_fd_state_find(fd);
+    ZcFdState *st = ctx->zc;
     if (!st) {
         return;
     }
+    g_mutex_lock(&ctx->lock);
     GSList *list = st->pending;
     st->pending = NULL;
     for (GSList *it = list; it; it = it->next) {
@@ -383,19 +311,18 @@ static void zc_fd_teardown(int fd)
             g_free(zp->bufs);
         }
         if (zp->elem) {
-            if (pending_elems) {
-                g_hash_table_remove(pending_elems, pending_key(fd, zp->seq));
-            }
+            pending_remove(ctx, zp->seq);
             g_free(zp->elem);
         }
         g_free(zp);
     }
     g_slist_free(list);
-    g_hash_table_remove(zc_fds, GINT_TO_POINTER(fd));
+    g_mutex_unlock(&ctx->lock);
     g_free(st);
+    ctx->zc = NULL;
 }
 
-/* -------------- Local QEMU ------------- */
+/* -------------- Local QEMU Forwarding ------------- */
 
 // enable socket keepalive in kernel, ~55s maximum link down detection
 static void enable_tcp_keepalive(int fd)
@@ -659,12 +586,19 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
         return false;
     }
     enable_tcp_keepalive(socket);
-    zc_enable(socket);
+    /* MSG_ZEROCOPY is enabled lazily on the first send (see local_send_msg):
+     * it must run on the socket iothread, which owns the zc state */
     return true;
 }
 
-/* io_write handler: the socket has send buffer space again, so retry the
- * deferred elem; once it is out, drop the write handler and drain the vq */
+// pre-definition
+static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem);
+
+/*
+* called by io_write event, registered in local_send_msg
+* when kernel refuse to send because of lack of buffers, this handler will
+* be invoked when there are free buffers.
+*/
 static void local_retry_send(void *opaque)
 {
     VirtQueue *vq = opaque;
@@ -673,7 +607,7 @@ static void local_retry_send(void *opaque)
     if (elem) {
         ctx->pending_elem = NULL;
         if (!local_send_msg(vq, elem)) {
-            /* still full: keep waiting for the next writable event */
+            /* not enough for the elem: keep waiting for the next writable event */
             ctx->pending_elem = elem;
             return;
         }
@@ -681,11 +615,16 @@ static void local_retry_send(void *opaque)
     AioContext *ctx_aio = vq_get_aio_ctx(vq);
     if (ctx_aio) {
         aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                           local_response_handler, NULL, NULL, NULL, vq);
+                           local_response_distributor, NULL, NULL, NULL, vq);
     }
-    local_handle_output(vq);
+    // continue to handle this vq
+    local_handle_output(vq, virtqueue_get_remote_ctx(vq));
 }
 
+/*
+* called by local qemu local_handle_output()
+* send pending elems in vq to remote stub
+*/
 static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
@@ -730,7 +669,12 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
      * per segment - anything it cannot pin is copied and a completion is
      * still queued, so the bookkeeping below is always correct.
      */
-    ZcFdState *st = zc_fd_state_find(ctx->resp_fd);
+    if (!ctx->zc) {
+        /* first send on this vq: enable MSG_ZEROCOPY. Runs on the socket
+         * iothread, the same thread that owns the zc state otherwise. */
+        ctx->zc = zc_enable(ctx->resp_fd);
+    }
+    ZcFdState *st = ctx->zc;
     bool used_zc = false;
     ssize_t ret;
     if (st && st->enabled && total >= ZC_SEND_MIN) {
@@ -758,7 +702,6 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
         bufs[1] = lens;
         bufs[2] = msg_sg;
         ZcPending *zp = g_new0(ZcPending, 1);
-        zp->serial = st->serial++;
         zp->bufs = bufs;
         zp->n_bufs = 3;
         zp->elem = elem;
@@ -770,16 +713,17 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
             zp->len_known = true;
             zp->push_len = 0;
         }
+        g_mutex_lock(&ctx->lock);
+        zp->serial = st->serial++;
         st->pending = g_slist_prepend(st->pending, zp);
-
         if (elem->in_num > 0) {
             /* track the in-flight elem so its response can be matched by seq */
-            if (!pending_elems) {
-                pending_elems = g_hash_table_new(g_direct_hash, g_direct_equal);
-            }
-            g_hash_table_insert(pending_elems,
-                                pending_key(ctx->resp_fd, seq), elem);
+            PendingElem *pe = g_new0(PendingElem, 1);
+            pe->seq = seq;
+            pe->elem = elem;
+            g_queue_push_tail(&ctx->pending, pe);
         }
+        g_mutex_unlock(&ctx->lock);
         return true;
     }
 
@@ -796,7 +740,7 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_handler, NULL, NULL,
+                                   local_response_distributor, NULL, NULL,
                                    local_retry_send, vq);
             }
             return false;
@@ -809,22 +753,68 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
         /* no in-buffers: the stub sends no resp for this request, so
          * complete the used-ring entry right away */
         virtqueue_push(vq, elem, 0);
-        defer_call(local_virtio_notify, vq);
+        virtio_notify(virtqueue_get_vdev(vq), vq);
         g_free(elem);
         return true;
     }
 
     /* track the in-flight elem so its response can be matched by seq */
-    if (!pending_elems) {
-        pending_elems = g_hash_table_new(g_direct_hash, g_direct_equal);
-    }
-    g_hash_table_insert(pending_elems, pending_key(ctx->resp_fd, seq), elem);
+    g_mutex_lock(&ctx->lock);
+    PendingElem *pe = g_new0(PendingElem, 1);
+    pe->seq = seq;
+    pe->elem = elem;
+    g_queue_push_tail(&ctx->pending, pe);
+    g_mutex_unlock(&ctx->lock);
     return true;
 }
 
-void local_handle_output(VirtQueue *vq)
+/* -------------- Local QEMU Virtio Interception ------------- */
+
+int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *aio_ctx)
 {
-    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    int i, r;
+    memory_region_transaction_begin();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
+            continue;
+        r = virtio_bus_set_host_notifier(qbus, i, true);
+        if (r != 0) {
+            fprintf(stderr, "virtio-blk failed to set host notifier (%d)\n", r);
+            goto assign_err;
+        }
+    }
+    memory_region_transaction_commit();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        VirtQueue *vq = virtio_get_queue(vdev, i);
+        virtio_queue_aio_attach_host_notifier(vq, aio_ctx);
+    }
+
+    return 0;
+
+assign_err:
+    memory_region_transaction_commit();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
+            continue;
+        virtio_bus_set_host_notifier(qbus, i, false);
+    }
+    memory_region_transaction_commit();
+    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
+        if (!virtio_queue_get_num(vdev, i))
+            continue;
+        virtio_bus_cleanup_host_notifier(qbus, i);
+    }
+    return 0;
+}
+
+void local_distributor(EventNotifier *n)
+{
+    
+}
+
+void local_handle_output(VirtQueue *vq, RemoteVQueueCtx *ctx)
+{
     if (!ctx || ctx->pending_elem) {
         /* an elem is already deferred for a send retry: don't pop more
          * (their payloads would not be sent and the elem would leak); the
@@ -833,16 +823,64 @@ void local_handle_output(VirtQueue *vq)
     }
     /* drain the vring: pop and submit as many elems as possible without
      * blocking the aio loop */
+    // to review: the same fd event will be lift up, may causing HoL, think about multiple aio iothread
     while (true) {
         VirtQueueElement *elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
         if (!elem) {
             break;
         }
-        if (!local_send_msg(vq, elem)) {
+        if (!local_send_msg(vq, elem)) { // send false, wait for the next time
             break;
         }
     }
 }
+
+
+/* true if any active vq of vdev carries a remote ctx: this process is the
+ * remote stub for vdev (the local qemu side is marked by register_mosaic) */
+static bool stub_vdev_has_remote_vq(VirtIODevice *vdev)
+{
+    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        VirtQueue *vq = virtio_get_queue(vdev, n);
+        if (virtio_queue_get_num(vdev, n) && virtqueue_get_remote_ctx(vq)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool remote_virtio_queue_empty(void *opaque)
+{
+    RemoteVQueueCtx *ctx = opaque;
+    return ctx->elem != NULL; /* popped once but not pushed yet */
+}
+
+bool remote_virtio_notify_skip(VirtIODevice *vdev)
+{
+    /* the stub process has no guest to deliver the config interrupt to */
+    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
+}
+
+bool check_virtio_device_remote(VirtIODevice *vdev)
+{
+    /* the local qemu side is marked by register_mosaic; only the stub
+     * process (no mosaic marking) dispatches through the remote stubs */
+    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
+}
+
+bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
+{
+    return local_search_aio_ctx(vdev) != NULL;
+}
+
+void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
+{
+}
+
+
+
+
+
 
 /*
  * per-connection receive state for incremental, non-blocking reads of the
@@ -866,15 +904,12 @@ void local_response_handler(void *opaque)
 
     /* drain MSG_ZEROCOPY completions: each one may release a deferred
      * used-ring push (POLLERR on this fd wakes this handler) */
-    zc_drain(fd);
+    zc_drain(ctx);
 
-    if (!recv_states) {
-        recv_states = g_hash_table_new(g_direct_hash, g_direct_equal);
-    }
-    LocalRecvState *rs = g_hash_table_lookup(recv_states, GINT_TO_POINTER(fd));
+    LocalRecvState *rs = ctx->recv;
     if (!rs) {
         rs = g_new0(LocalRecvState, 1);
-        g_hash_table_insert(recv_states, GINT_TO_POINTER(fd), rs);
+        ctx->recv = rs;
     }
 
     while (true) {
@@ -907,7 +942,9 @@ void local_response_handler(void *opaque)
                              vq_nr, virtio_get_queue_index(vq));
                 goto conn_err;
             }
-            rs->cur = g_hash_table_lookup(pending_elems, pending_key(fd, seq));
+            g_mutex_lock(&ctx->lock);
+            rs->cur = pending_lookup(ctx, seq);
+            g_mutex_unlock(&ctx->lock);
             if (!rs->cur) {
                 error_report("local qemu: no pending elem for seq %d", seq);
                 goto conn_err;
@@ -921,9 +958,12 @@ void local_response_handler(void *opaque)
         if (rs->stage == 1) {
             VirtQueueElement *elem = rs->cur;
             if (rs->cur_off >= rs->need_len) {
-                ZcFdState *st = zc_fd_state_find(fd);
+                ZcFdState *st = ctx->zc;
                 ZcPending *zp = NULL;
                 if (st) { // fd has used zc
+                    /* the socket iothread may concurrently prepend a new zc
+                     * send, so the pending list walk must take ctx->lock */
+                    g_mutex_lock(&ctx->lock);
                     for (GSList *it = st->pending; it; it = it->next) {
                         ZcPending *p = it->data;
                         if (p->elem == elem) {
@@ -931,24 +971,27 @@ void local_response_handler(void *opaque)
                             break;
                         }
                     }
+                    g_mutex_unlock(&ctx->lock);
                 }
                 if (zp) { // this elem sused zc
                     zp->push_len = rs->need_len;
                     zp->len_known = true;
                     if (!zp->bufs) { // zc has completed by zc_complete_one()
+                        g_mutex_lock(&ctx->lock);
                         st->pending = g_slist_remove(st->pending, zp);
+                        pending_remove(ctx, rs->cur_seq);
+                        g_mutex_unlock(&ctx->lock);
                         virtqueue_push(vq, elem, rs->need_len);
-                        g_hash_table_remove(pending_elems,
-                                            pending_key(fd, rs->cur_seq));
-                        defer_call(local_virtio_notify, vq);
+                        virtio_notify(virtqueue_get_vdev(vq), vq);
                         g_free(elem);
                         g_free(zp);
                     } /* else {} wait zc_complete_one() to handle */
                 } else { // this elem is sent by copy
+                    g_mutex_lock(&ctx->lock);
+                    pending_remove(ctx, rs->cur_seq);
+                    g_mutex_unlock(&ctx->lock);
                     virtqueue_push(vq, elem, rs->need_len);
-                    g_hash_table_remove(pending_elems,
-                                        pending_key(fd, rs->cur_seq));
-                    defer_call(local_virtio_notify, vq);
+                    virtio_notify(virtqueue_get_vdev(vq), vq);
                     g_free(elem);
                 }
                 rs->stage = 0;
@@ -1001,11 +1044,13 @@ conn_err:
     /* the connection is unusable; drop the in-flight elem and reset state.
      * zc_fd_teardown() owns (frees) every elem still tracked by the zc
      * layer, so only free rs->cur here if it is not one of them. */
-    bool cur_is_zc = rs->cur && zc_pending_has_elem(fd, rs->cur);
-    zc_fd_teardown(fd);
+    bool cur_is_zc = rs->cur && zc_pending_has_elem(ctx, rs->cur);
+    zc_fd_teardown(ctx);
     if (rs->cur) {
-        g_hash_table_remove(pending_elems, pending_key(fd, rs->cur_seq));
         if (!cur_is_zc) {
+            g_mutex_lock(&ctx->lock);
+            pending_remove(ctx, rs->cur_seq);
+            g_mutex_unlock(&ctx->lock);
             g_free(rs->cur);
         }
         rs->cur = NULL;
@@ -1019,6 +1064,119 @@ conn_err:
     rs->hdr_off = 0;
     rs->cur_off = 0;
     rs->need_len = 0;
+}
+
+/* -------------- Local QEMU Resp Distributor ------------- */
+
+/*
+ * Internal resp-processing thread pool, unrelated to the device IOThreads.
+ * The distributor (running on the socket iothread) receives a resp fd event
+ * and hands it to the worker that owns the fd's vq; the worker then runs the
+ * ordinary local_response_handler() on its own thread. One worker handles one
+ * fd at a time: when the worker is busy the distributor skips the event, and
+ * the level-triggered epoll re-arms it on a later round. The per-vq state in
+ * RemoteVQueueCtx is only touched by that vq's two owner threads (socket
+ * iothread for sends, this worker for responses), serialized by ctx->lock.
+ */
+typedef struct RemoteRespWorker {
+    AioContext *ctx;          /* this worker's event loop */
+    QEMUBH *bh;               /* distributor -> worker handoff */
+    QemuThread thread;
+    VirtQueue *vq;            /* the vq handed over (written by distributor) */
+    int busy_fd;              /* fd currently handled, -1 if idle (qatomic) */
+} RemoteRespWorker;
+
+static RemoteRespWorker *resp_workers;
+static GMutex resp_workers_lock;
+static bool resp_workers_started;
+
+static void resp_worker_bh(void *opaque);
+
+static void *resp_worker_thread(void *opaque)
+{
+    RemoteRespWorker *w = opaque;
+
+    rcu_register_thread();
+    qemu_set_current_aio_context(w->ctx);
+    while (true) {
+        aio_poll(w->ctx, true);
+    }
+    return NULL;
+}
+
+static void resp_workers_ensure(void)
+{
+    g_mutex_lock(&resp_workers_lock);
+    if (!resp_workers_started) {
+        resp_workers = g_new0(RemoteRespWorker, VIRTIO_REMOTE_RESP_WORKERS);
+        for (int i = 0; i < VIRTIO_REMOTE_RESP_WORKERS; i++) {
+            RemoteRespWorker *w = &resp_workers[i];
+            w->ctx = aio_context_new(&error_abort);
+            aio_context_set_poll_params(w->ctx, 0, 0, 0, &error_abort);
+            w->busy_fd = -1;
+            w->bh = aio_bh_new(w->ctx, resp_worker_bh, w);
+            qemu_thread_create(&w->thread, "virtio-remote-resp",
+                               resp_worker_thread, w, QEMU_THREAD_JOINABLE);
+        }
+        resp_workers_started = true;
+    }
+    g_mutex_unlock(&resp_workers_lock);
+}
+
+static RemoteRespWorker *resp_worker_for_vq(VirtQueue *vq)
+{
+    resp_workers_ensure();
+    return &resp_workers[virtio_get_queue_index(vq) % VIRTIO_REMOTE_RESP_WORKERS];
+}
+
+/*
+ * Runs on a resp worker thread. Executes the ordinary response handler, which
+ * drains the socket to EAGAIN, then releases the worker for the next event.
+ */
+static void resp_worker_bh(void *opaque)
+{
+    RemoteRespWorker *w = opaque;
+    VirtQueue *vq = w->vq;
+
+    local_response_handler(vq);
+    qatomic_set(&w->busy_fd, -1);
+}
+
+/*
+ * io_read handler of every local resp fd. Instead of processing the response
+ * inline, it picks the resp worker of the fd's vq and hands the work over:
+ * the response bytes are then parsed (and the used ring pushed) on the
+ * worker's thread, so several vqs can progress in parallel. A busy worker is
+ * skipped - the fd stays level-triggered and the next epoll round retries.
+ */
+void local_response_distributor(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    RemoteRespWorker *w;
+
+    if (!ctx) {
+        return;
+    }
+    w = resp_worker_for_vq(vq);
+    if (qatomic_cmpxchg(&w->busy_fd, -1, ctx->resp_fd) != -1) {
+        /* worker busy: skip this event, it will be re-armed */
+        return;
+    }
+    w->vq = vq;
+    qemu_bh_schedule(w->bh);
+}
+
+// to review
+void remote_virtio_queue_host_notifier_read(EventNotifier *n)
+{
+    VirtQueue *vq = host_notifier_to_vq(n);
+    if (event_notifier_test_and_clear(n)) {
+        /* stub side: request processing is driven by the vq TCP socket
+         * (remote_stub_req_handler), so a host-notifier kick has no guest
+         * kick to forward; just drain the eventfd */
+        (void)vq;
+    }
 }
 
 /* -------------- Remote Stub ------------- */
@@ -1076,23 +1234,177 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
 }
 
 /*
- * a response that could not be sent because the socket send buffer was full.
- * Owns everything needed to retry it on the next writable event and to
- * release the retained buffers once it goes out.
+ * a response queued on the stub side. The header + iov describe the resp
+ * [vq_nr(4B)][elem_index(4B)][data_len(4B)][data...]; the in_sg payload
+ * buffers are owned here until the send (or the zc completion) happens.
  */
 typedef struct StubResp {
     int *header;          /* resp header, owned until sent */
     struct iovec *iov;    /* resp_iov: [header, in_sg...], owned until sent */
     int iov_cnt;
+    unsigned int len;     /* resp payload length (zc threshold) */
     void **in_bufs;       /* bases of the in_sg payload buffers */
     unsigned int n_in_sg;
 } StubResp;
 
-/* retry a deferred response once the socket is writable again */
+/*
+ * Per-vq response send queue: the single cross-thread structure between the
+ * device completion thread(s) (producer) and the socket iothread (consumer).
+ * remote_stub_virtqueue_push() only enqueues + schedules the drain BH; every
+ * sendmsg()/MSG_ZEROCOPY bookkeeping and the deferred retry happen in
+ * stub_drain_send() on the socket iothread, so the rest of the stub-side
+ * state stays single-threaded no matter where the device completes.
+ */
+typedef struct StubSendQueue {
+    GMutex lock;              /* protects resp_q / bh_scheduled */
+    GQueue resp_q;            /* queued StubResp, drained by the iothread */
+    QEMUBH *bh;               /* drain BH running on the socket iothread */
+    bool bh_scheduled;        /* a drain BH is already pending */
+    bool writable_handler;    /* io_write handler registered (socket full) */
+} StubSendQueue;
+
+/* retry the queue head once the socket is writable again */
 static void remote_stub_retry_send(void *opaque);
 
 /* stub-side request receiver; forward decl (defined after this function) */
 static void remote_stub_req_handler(void *opaque);
+
+/* release a StubResp and its payload buffers. zc_deferred keeps the header,
+ * iov and the first sent_sgs in buffers alive for a zc completion. */
+static void stub_resp_free(StubResp *sr, unsigned int sent_sgs,
+                           bool zc_deferred)
+{
+    if (zc_deferred) {
+        for (unsigned int i = sent_sgs; i < sr->n_in_sg; i++) {
+            free(sr->in_bufs[i]);
+        }
+    } else {
+        g_free(sr->header);
+        g_free(sr->iov);
+        for (unsigned int i = 0; i < sr->n_in_sg; i++) {
+            free(sr->in_bufs[i]);
+        }
+    }
+    g_free(sr->in_bufs);
+    g_free(sr);
+}
+
+/* drop every still-queued response and the send queue itself */
+static void stub_send_queue_destroy(StubSendQueue *q)
+{
+    StubResp *sr;
+    g_mutex_lock(&q->lock);
+    while ((sr = g_queue_pop_head(&q->resp_q))) {
+        g_mutex_unlock(&q->lock);
+        stub_resp_free(sr, sr->iov_cnt - 1, false);
+        g_mutex_lock(&q->lock);
+    }
+    g_mutex_unlock(&q->lock);
+    qemu_bh_delete(q->bh);
+    g_mutex_clear(&q->lock);
+    g_free(q);
+}
+
+/*
+ * Send every queued response. Runs on the socket iothread (from the drain BH
+ * or the writable handler), which is the single owner of the send path: the
+ * zc serial/pending list and the EAGAIN retry all live here, so they never
+ * race with remote_stub_virtqueue_push().
+ * Returns false if the socket is full and the head is parked on a writable
+ * event; true once the queue is empty.
+ */
+static bool stub_drain_send(VirtQueue *vq)
+{
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    StubSendQueue *q = ctx->send_q;
+    AioContext *ctx_aio = vq_get_aio_ctx(vq);
+    int fd = ctx->resp_fd;
+
+    for (;;) {
+        g_mutex_lock(&q->lock);
+        StubResp *sr = g_queue_peek_head(&q->resp_q);
+        g_mutex_unlock(&q->lock);
+        if (!sr) {
+            return true;
+        }
+        if (q->writable_handler) {
+            /* socket still full: the writable handler retries the head */
+            return false;
+        }
+
+        struct msghdr msg = { .msg_iov = sr->iov, .msg_iovlen = sr->iov_cnt };
+        ZcFdState *st = ctx->zc;
+        bool used_zc = false;
+        ssize_t ret;
+        if (st && st->enabled && sr->len >= ZC_SEND_MIN) {
+            ret = sendmsg(fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
+            if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
+                /* kernel refuses zc for this call: fall back to a copy send */
+                ret = sendmsg(fd, &msg, MSG_NOSIGNAL);
+            } else if (ret > 0) {
+                used_zc = true;
+            }
+        } else {
+            ret = sendmsg(fd, &msg, MSG_NOSIGNAL);
+        }
+        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            /* send buffer full: keep sr at the head and retry on writable.
+             * retry goes in the io_write slot: with polling disabled on the
+             * stub iothread an io_poll_ready handler would never fire. */
+            q->writable_handler = true;
+            if (ctx_aio) {
+                aio_set_fd_handler(ctx_aio, fd,
+                                   remote_stub_req_handler,
+                                   remote_stub_retry_send, NULL, NULL, vq);
+            }
+            return false;
+        }
+        if (ret < 0) {
+            error_report("remote stub: sendmsg resp failed: %s", strerror(errno));
+        }
+
+        g_mutex_lock(&q->lock);
+        g_queue_pop_head(&q->resp_q);
+        g_mutex_unlock(&q->lock);
+
+        unsigned int sgs = sr->iov_cnt - 1;
+        if (used_zc) {
+            /* release the header, iov and the sent in buffers on the zc
+             * completion, not now */
+            void **bufs = g_new(void *, 2 + sgs);
+            unsigned int n = 0;
+            bufs[n++] = sr->header;
+            bufs[n++] = sr->iov;
+            for (unsigned int i = 0; i < sgs; i++) {
+                bufs[n++] = sr->in_bufs[i];
+            }
+            ZcPending *zp = g_new0(ZcPending, 1);
+            zp->serial = st->serial++;
+            zp->bufs = bufs;
+            zp->n_bufs = n;
+            st->pending = g_slist_prepend(st->pending, zp);
+        }
+        stub_resp_free(sr, sgs, used_zc);
+    }
+}
+
+/* drain BH: scheduled by remote_stub_virtqueue_push() from any thread */
+static void stub_drain_send_bh(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+    StubSendQueue *q = ctx->send_q;
+
+    if (!q) {
+        /* the connection was torn down before this BH ran */
+        return;
+    }
+    g_mutex_lock(&q->lock);
+    q->bh_scheduled = false;
+    g_mutex_unlock(&q->lock);
+
+    stub_drain_send(vq);
+}
 
 /*
  * called by virtio.c through virtqueue_push()/virtqueue_fill() when
@@ -1104,7 +1416,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len)
 {
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    bool in_sg_deferred = false; /* in_sg released on a zc completion */
+    StubResp *sr = NULL;
 
     if (ctx && elem->in_num > 0) {
         int *resp_header = g_new0(int, 3);
@@ -1123,145 +1435,80 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
             error_report("remote stub: resp len %u exceeds in_sg capacity %u",
                          len, cnt);
             g_free(resp_header);
-            goto free_bufs;
-        }
-        iovec *resp_iov = g_new0(iovec, sgs + 1);
-        resp_iov[0].iov_base = resp_header;
-        resp_iov[0].iov_len = 3 * sizeof(int);
-        memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
-        resp_iov[sgs].iov_len -= (cnt - len);
-
-        struct msghdr msg = {
-            .msg_iov = resp_iov,
-            .msg_iovlen = sgs + 1,
-        };
-
-        /*
-         * Try MSG_ZEROCOPY for large responses: the in_sg buffers are
-         * page-aligned (see remote_stub_req_handler), so the NIC can DMA
-         * the payload straight from them. Everything the kernel may still
-         * reference is released on the completion (drained by zc_drain).
-         */
-        ZcFdState *st = zc_fd_state_find(ctx->resp_fd);
-        bool used_zc = false;
-        ssize_t ret;
-        if (st && st->enabled && len >= ZC_SEND_MIN) {
-            ret = sendmsg(ctx->resp_fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
-            if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
-                /* kernel refuses zc for this call: fall back to a copy send */
-                ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
-            } else if (ret > 0) {
-                used_zc = true;
-            }
         } else {
-            ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
-        }
-        if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            /* resp buffer full: keep the header, iov and in_sg payload and
-             * retry on the next writable event instead of dropping the resp
-             * (a dropped resp would hang the local elem forever). The aio
-             * loop keeps running; only this vq's response is stalled. */
-            StubResp *sr = g_new0(StubResp, 1);
+            iovec *resp_iov = g_new0(iovec, sgs + 1);
+            resp_iov[0].iov_base = resp_header;
+            resp_iov[0].iov_len = 3 * sizeof(int);
+            memcpy(resp_iov + 1, elem->in_sg, sizeof(iovec) * sgs);
+            resp_iov[sgs].iov_len -= (cnt - len);
+
+            sr = g_new0(StubResp, 1);
             sr->header = resp_header;
             sr->iov = resp_iov;
             sr->iov_cnt = sgs + 1;
+            sr->len = len;
             sr->n_in_sg = elem->in_num;
             sr->in_bufs = g_new(void *, elem->in_num);
             for (unsigned int i = 0; i < elem->in_num; i++) {
                 sr->in_bufs[i] = elem->in_sg[i].iov_base;
             }
-            ctx->pending_resp = sr;
-            AioContext *ctx_aio = vq_get_aio_ctx(vq);
-            if (ctx_aio) {
-                aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   remote_stub_req_handler, NULL, NULL,
-                                   remote_stub_retry_send, vq);
-            }
-            /* bases are kept by StubResp; only out_sg is released below */
-            in_sg_deferred = true;
-            goto free_bufs;
-        }
-        if (ret < 0) {
-            error_report("remote stub: sendmsg resp failed: %s", strerror(errno));
-        }
-
-        if (used_zc) {
-            /* release resp_header, resp_iov and the sent in buffers on the
-             * completion, not now; in buffers beyond sgs are untouched and
-             * can go right away */
-            in_sg_deferred = true;
-            for (unsigned int i = sgs; i < elem->in_num; i++) {
-                free(elem->in_sg[i].iov_base);
-            }
-            void **bufs = g_new(void *, 2 + sgs);
-            unsigned int n = 0;
-            bufs[n++] = resp_header;
-            bufs[n++] = resp_iov;
-            for (unsigned int i = 0; i < sgs; i++) {
-                bufs[n++] = elem->in_sg[i].iov_base;
-            }
-            ZcPending *zp = g_new0(ZcPending, 1);
-            zp->serial = st->serial++;
-            zp->bufs = bufs;
-            zp->n_bufs = n;
-            st->pending = g_slist_prepend(st->pending, zp);
-        } else {
-            g_free(resp_header);
-            g_free(resp_iov);
         }
     }
 
-free_bufs:
+    /* the out buffers are always released here */
     for (unsigned int i = 0; i < elem->out_num && elem->out_sg[i].iov_base; i++) {
         g_free(elem->out_sg[i].iov_base);
     }
-    if (!in_sg_deferred) {
+    if (!sr) {
+        /* no (or dropped) resp: the in buffers are released right away */
         for (unsigned int i = 0; i < elem->in_num && elem->in_sg[i].iov_base; i++) {
             free(elem->in_sg[i].iov_base);
         }
+        return;
     }
+
+    /*
+     * Hand the resp to the socket iothread: this thread only enqueues and
+     * schedules the drain BH. The actual sendmsg()/MSG_ZEROCOPY bookkeeping
+     * and the EAGAIN retry happen in stub_drain_send() on the iothread, so
+     * those structures stay single-owner no matter which thread completed
+     * this elem.
+     */
+    StubSendQueue *q = ctx->send_q;
+    if (!q) {
+        /* the connection was already torn down: drop the resp */
+        stub_resp_free(sr, sr->iov_cnt - 1, false);
+        return;
+    }
+    g_mutex_lock(&q->lock);
+    bool was_empty = g_queue_is_empty(&q->resp_q);
+    g_queue_push_tail(&q->resp_q, sr);
+    if (was_empty && !q->bh_scheduled) {
+        q->bh_scheduled = true;
+        qemu_bh_schedule(q->bh);
+    }
+    g_mutex_unlock(&q->lock);
 }
 
 /* io_write handler: the socket has send buffer space again, so retry the
- * deferred response. Once it is out, release the retained buffers, drop the
- * write handler and resume request delivery. */
+ * stalled head of the send queue. Once the queue drains, the write handler
+ * is dropped and request delivery resumes. */
 static void remote_stub_retry_send(void *opaque)
 {
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    StubResp *sr = ctx->pending_resp;
+    StubSendQueue *q = ctx->send_q;
     AioContext *ctx_aio = vq_get_aio_ctx(vq);
-    if (!sr) {
-        if (ctx_aio) {
-            aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                               remote_stub_req_handler, NULL, NULL, NULL, vq);
-        }
+    if (!q) {
         return;
     }
-    struct msghdr msg = { .msg_iov = sr->iov, .msg_iovlen = sr->iov_cnt };
-    ssize_t ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
-    if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        return; /* still full: keep waiting for the next writable event */
-    }
-    if (ret < 0) {
-        error_report("remote stub: retry sendmsg resp failed: %s",
-                     strerror(errno));
-    }
-    /* sent (or fatal): the payload is no longer needed */
-    ctx->pending_resp = NULL;
-    g_free(sr->header);
-    g_free(sr->iov);
-    for (unsigned int i = 0; i < sr->n_in_sg; i++) {
-        free(sr->in_bufs[i]);
-    }
-    g_free(sr->in_bufs);
-    g_free(sr);
+
+    q->writable_handler = false;
     if (ctx_aio) {
         aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                            remote_stub_req_handler, NULL, NULL, NULL, vq);
     }
-    /* delivery may have been deferred while the socket was full */
-    remote_stub_req_handler(vq);
+    stub_drain_send(vq);
 }
 
 /*
@@ -1298,7 +1545,7 @@ static void remote_stub_req_handler(void *opaque)
 
     /* drain MSG_ZEROCOPY completions so deferred response buffers can be
      * released (POLLERR on this fd wakes this handler) */
-    zc_drain(fd);
+    zc_drain(ctx);
 
     if (!stub_recv_states) {
         stub_recv_states = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -1430,11 +1677,11 @@ static void remote_stub_req_handler(void *opaque)
             }
 
             /* full request received: deliver it to the device */
-            if (ctx->pending_resp) {
-                /* a previous resp is still queued for a writable retry;
-                 * deferring delivery keeps the device from pushing another
-                 * resp over the pending one. remote_stub_retry_send resumes
-                 * request processing once the socket drains. */
+            if (ctx->send_q && ctx->send_q->writable_handler) {
+                /* the socket is still full: the drain is parked on a writable
+                 * event. Deferring delivery keeps the queue from growing
+                 * unboundedly; remote_stub_retry_send resumes processing
+                 * once the socket drains. */
                 return;
             }
             ctx->elem_index = rs->seq;
@@ -1465,7 +1712,7 @@ static void remote_stub_req_handler(void *opaque)
 
 conn_err:
     /* the connection is unusable: release partial buffers, then drop it */
-    zc_fd_teardown(fd);
+    zc_fd_teardown(ctx);
     if (rs->lens) {
         g_free(rs->lens);
     }
@@ -1481,17 +1728,10 @@ conn_err:
         }
         g_free(rs->in_sg);
     }
-    /* a response still waiting for a writable retry never went out */
-    if (ctx->pending_resp) {
-        StubResp *sr = ctx->pending_resp;
-        ctx->pending_resp = NULL;
-        g_free(sr->header);
-        g_free(sr->iov);
-        for (unsigned int i = 0; i < sr->n_in_sg; i++) {
-            free(sr->in_bufs[i]);
-        }
-        g_free(sr->in_bufs);
-        g_free(sr);
+    /* drop every response still queued for the dead connection */
+    if (ctx->send_q) {
+        stub_send_queue_destroy(ctx->send_q);
+        ctx->send_q = NULL;
     }
     g_hash_table_remove(stub_recv_states, GINT_TO_POINTER(fd));
     g_free(rs);
@@ -1665,7 +1905,14 @@ void remote_accept_handler(void *opaque)
         }
         ctx->resp_fd = vq_fd;
         ctx->vq_nr = n;
-        zc_enable(vq_fd);
+        g_mutex_init(&ctx->lock);
+        g_queue_init(&ctx->pending);
+        ctx->zc = zc_enable(vq_fd);
+        /* send queue drained on this iothread via the drain BH */
+        ctx->send_q = g_new0(StubSendQueue, 1);
+        g_mutex_init(&ctx->send_q->lock);
+        g_queue_init(&ctx->send_q->resp_q);
+        ctx->send_q->bh = aio_bh_new(sctx->aio_ctx, stub_drain_send_bh, vq);
         aio_set_fd_handler(sctx->aio_ctx, vq_fd,
                            remote_stub_req_handler, NULL, NULL, NULL, vq);
         vq_idx++;
@@ -1695,6 +1942,14 @@ fail:
             aio_set_fd_handler(sctx->aio_ctx, ctx->resp_fd,
                                NULL, NULL, NULL, NULL, NULL);
             close(ctx->resp_fd);
+            if (ctx->send_q) {
+                stub_send_queue_destroy(ctx->send_q);
+                ctx->send_q = NULL;
+            }
+            if (ctx->zc) {
+                g_free(ctx->zc);
+            }
+            g_mutex_clear(&ctx->lock);
             virtqueue_set_remote_ctx(vq, NULL);
             g_free(ctx);
         }

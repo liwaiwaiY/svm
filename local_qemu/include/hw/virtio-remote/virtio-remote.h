@@ -16,7 +16,17 @@
 typedef struct VirtQueue VirtQueue;
 typedef struct VirtIODevice VirtIODevice;
 typedef struct VirtQueueElement VirtQueueElement;
+typedef struct StubSendQueue StubSendQueue;
 typedef struct iovec iovec;
+
+/*
+ * Number of resp-processing worker threads in the virtio-remote internal
+ * pool. These workers are unrelated to the device IOThreads: resp fds are
+ * hashed onto them (vq_nr % VIRTIO_REMOTE_RESP_WORKERS), so several vqs can
+ * share one worker. A worker handles one fd at a time; extra events are
+ * skipped by the distributor and re-armed by the level-triggered epoll.
+ */
+#define VIRTIO_REMOTE_RESP_WORKERS 4
 
 typedef struct RemoteVQueueCtx {
     int resp_fd;
@@ -30,9 +40,24 @@ typedef struct RemoteVQueueCtx {
     void *elem;
     /* local: VirtQueueElement deferred for a send retry (socket was full) */
     void *pending_elem;
-    /* stub: StubResp deferred for a response send retry (socket was full) */
-    void *pending_resp;
+    /* stub: response send queue, drained by the socket iothread */
+    StubSendQueue *send_q;
+
+    /*
+     * cmsvm: per-vq resp-processing state. These are the per-vq counterparts
+     * of the old global hash tables; the distributor hands them to the resp
+     * worker together with the vq, so each vq's entries are only ever touched
+     * by that vq's owner threads. lock serializes the two cross-thread owners
+     * of the same vq: the socket iothread (send side) and the resp worker
+     * (response side).
+     */
+    GMutex lock;                  /* guards pending and zc->pending */
+    GQueue pending;               /* local: in-flight elems, seq-ordered */
+    void *recv;                   /* local: LocalRecvState of the resp stream */
+    void *zc;                     /* local/stub: MSG_ZEROCOPY state (ZcFdState) */
 } RemoteVQueueCtx;
+
+/* -------------- Device States ------------- */
 
 /*
 * called in local qemu in local_set_remote
@@ -46,6 +71,8 @@ void register_mosaic(VirtIODevice *vdev);
 */
 bool is_mosaic(VirtIODevice *vdev);
 
+/* -------------- Aio Contexts ------------- */
+
 /*
 * called in local qemu and remote stub in property setter
 * register aio context without modifyling vdev structure
@@ -58,26 +85,83 @@ void register_aio_ctx(VirtIODevice *vdev, AioContext *aio_ctx);
 */
 AioContext * local_search_aio_ctx(VirtIODevice *vdev);
 
+/* -------------- Environments ------------- */
+
 #define VIRTIO_LOCAL_ENV 0
 #define VIRTIO_REMOTE_ENV 1
 
 static int env_tag;
 
 /*
-* called in local qemu and remote
-* to chmod of env
+* called in local qemu and remote stub
+* to change value of env
 */
-void chenv(int new_env)
+static inline void chenv(int new_env)
 {
     if (new_env != VIRTIO_LOCAL_ENV && new_env != VIRTIO_REMOTE_ENV)
         return;
     env_tag = new_env;
 }
 
-int check_env(int tar_env)
+/*
+* called in local qemu and remote stub
+* to check the environment
+*/
+static inline int check_env(int tar_env)
 {
     return env_tag == tar_env;
 }
+
+
+/* -------------- Local QEMU Forwarding ------------- */
+
+
+/* -------------- Remote Stub Forwarding ------------- */
+
+/* -------------- Local QEMU Handlers ------------- */
+
+/*
+* called by local qemu in ioeventfd_impl
+* this will be called only by vdev which originally use main loop
+* vdev that originally use aio will use aio_attach in virtio.c
+*/
+int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
+
+/*
+* called by local qemu in aio iothread
+* all events of host notifiers and socket fds will be sent to this
+* this distributor needs to allocate worker and functions
+*/
+void local_distributor(EventNotifier *n);
+
+/*
+* called by local qemu in virtio_queue_notify_vq
+* handle notifier kick
+*/
+void local_handle_output(VirtQueue *vq, RemoteVQueueCtx *ctx);
+
+/*
+* called by local qemu in local_set_remote (and aio handlers):
+* handle a response arriving on a per-vq socket
+*/
+void local_response_handler(void *opaque);
+
+/*
+* called by local qemu, registered as the io_read handler of every resp fd:
+* receive an fd event, pick the resp worker of the fd's vq and hand the
+* response processing over to it. If the worker is already busy, the event is
+* skipped (the level-triggered epoll re-arms it for the next round).
+*/
+void local_response_distributor(void *opaque);
+
+/* -------------- Remote Stub Handlers ------------- */
+
+/*
+* called by virtio.c on the stub side (virtio_queue_aio_attach_host_notifier_no_poll):
+* the stub has no guest, so a host-notifier kick has nothing to forward
+*/
+void remote_virtio_queue_host_notifier_read(EventNotifier *n);
+
 
 /*
 * called by local qemu in property setter ("remote-machine")
@@ -97,18 +181,7 @@ int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
 */
 bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 
-/*
-* called by local qemu in ioeventfd_impl
-* this will be called only by vdev which originally use main loop
-* vdev that originally use aio will use aio_attach in virtio.c
-*/
-int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
 
-/*
-* called by local qemu in virtio_queue_notify_vq
-* handle notifier kick
-*/
-void local_handle_output(VirtQueue *vq);
 
 /*
 * used in remote stub in accept handler
@@ -170,7 +243,5 @@ bool check_virtio_device_remote(VirtIODevice *vdev);
 * called by virtio.c: true if vdev's responses are processed on an iothread
 */
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
-
-
 
 #endif /* VIRTIO_REMOTE */

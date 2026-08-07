@@ -253,6 +253,7 @@ VirtQueue *host_notifier_to_vq(EventNotifier *n)
     return container_of(n, VirtQueue, host_notifier);
 }
 
+// original virtio
 
 static const char *virtio_id_to_name(uint16_t device_id)
 {
@@ -2575,7 +2576,6 @@ void virtio_queue_set_shadow_avail_idx(VirtQueue *vq, uint16_t shadow_avail_idx)
     }
 }
 
-// cmsvm
 static void virtio_queue_notify_vq(VirtQueue *vq)
 {
     if (vq->vring.desc && vq->handle_output) {
@@ -2587,11 +2587,7 @@ static void virtio_queue_notify_vq(VirtQueue *vq)
 
         trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
 
-        // cmsvm
-        if (vq->remote_ctx)
-            local_handle_output(vq);
-        else
-            vq->handle_output(vdev, vq);
+        vq->handle_output(vdev, vq);
 
         if (unlikely(vdev->start_on_kick)) {
             virtio_set_started(vdev, true);
@@ -4025,10 +4021,17 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
         virtio_queue_set_notification(vq, 1);
     }
 
+    void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
+
+    if (unlikely(is_mosaic(vq->vdev))) {
+        cb_io_read = local_distributor;
+    }
+
+
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           virtio_queue_host_notifier_read,
+                           cb_io_read,
                            virtio_queue_host_notifier_aio_poll,
-                           virtio_queue_host_notifier_aio_poll_ready);
+                           virtio_queue_host_notifier_aio_poll_ready); // in virtio-remote, no poll
     aio_set_event_notifier_poll(ctx, &vq->host_notifier,
                                 virtio_queue_host_notifier_aio_poll_begin,
                                 virtio_queue_host_notifier_aio_poll_end);
@@ -4055,17 +4058,13 @@ void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ct
     }
 
     // cmsvm
-    void (*cb)(EventNotifier *n);
-    cb = NULL;
+    void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
     if (unlikely(check_virtio_device_remote(vq->vdev))) {
-        cb = remote_virtio_queue_host_notifier_read;
-        remote_virtio_register_aio(vq->vdev);
-    } else {
-        cb = virtio_queue_host_notifier_read;
+        cb_io_read = local_distributor;
     }
 
     aio_set_event_notifier(ctx, &vq->host_notifier,
-                           cb,
+                           cb_io_read,
                            NULL, NULL);
 
     /*
@@ -4262,8 +4261,7 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
-    if (unlikely(is_mosaic(vdev))) {
-        // register to aio iothread
+    if (unlikely(is_mosaic(vdev))) { // stub has no guest, so check mosaic is enough
         return virtio_device_start_ioeventfd_impl_local(vdev, local_search_aio_ctx(vdev));
     }
 
@@ -4426,6 +4424,8 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 
         if (!vq->remote_ctx) {
             vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
+            g_mutex_init(&((RemoteVQueueCtx *)vq->remote_ctx)->lock);
+            g_queue_init(&((RemoteVQueueCtx *)vq->remote_ctx)->pending);
         }
         RemoteVQueueCtx *ctx = vq->remote_ctx;
 
@@ -4441,7 +4441,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
             fcntl(ctx->resp_fd, F_SETFL, flags | O_NONBLOCK);
         }
         aio_set_fd_handler(aio_ctx, ctx->resp_fd,
-                           local_response_handler, NULL, NULL, NULL,
+                           local_response_distributor, NULL, NULL, NULL,
                            vq);
         vq_idx++;
     }
@@ -4464,6 +4464,10 @@ fail:
         if (ctx->resp_fd > 0) {
             aio_set_fd_handler(aio_ctx, ctx->resp_fd, NULL, NULL, NULL, NULL, NULL);
         }
+        if (ctx->zc) {
+            g_free(ctx->zc);
+        }
+        g_mutex_clear(&ctx->lock);
         virtqueue_set_remote_ctx(vq, NULL);
         g_free(ctx);
     }
