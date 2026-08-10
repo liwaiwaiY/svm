@@ -4022,19 +4022,33 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     }
 
     void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
+    AioPollFn *cb_io_poll = virtio_queue_host_notifier_aio_poll;
+    EventNotifierHandler *cb_poll_ready = virtio_queue_host_notifier_aio_poll_ready;
+    bool poll_notifier = true;
 
     if (unlikely(is_mosaic(vq->vdev))) {
-        cb_io_read = local_distributor;
+        /*
+         * virtio-remote: kicks are dispatched to the vq's worker thread (see
+         * local_notifier_distributor), which must stay the only owner of the
+         * vring. Bypass userspace polling so the poll_ready path cannot touch
+         * the vq on this iothread; the remote iothread disables busy poll
+         * anyway (poll_max_ns = 0).
+         */
+        cb_io_read = local_notifier_distributor;
+        cb_io_poll = NULL;
+        cb_poll_ready = NULL;
+        poll_notifier = false;
     }
-
 
     aio_set_event_notifier(ctx, &vq->host_notifier,
                            cb_io_read,
-                           virtio_queue_host_notifier_aio_poll,
-                           virtio_queue_host_notifier_aio_poll_ready); // in virtio-remote, no poll
-    aio_set_event_notifier_poll(ctx, &vq->host_notifier,
-                                virtio_queue_host_notifier_aio_poll_begin,
-                                virtio_queue_host_notifier_aio_poll_end);
+                           cb_io_poll,
+                           cb_poll_ready);
+    if (poll_notifier) {
+        aio_set_event_notifier_poll(ctx, &vq->host_notifier,
+                                    virtio_queue_host_notifier_aio_poll_begin,
+                                    virtio_queue_host_notifier_aio_poll_end);
+    }
 
     /*
      * We will have ignored notifications about new requests from the guest

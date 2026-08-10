@@ -20,11 +20,13 @@ typedef struct StubSendQueue StubSendQueue;
 typedef struct iovec iovec;
 
 /*
- * Number of resp-processing worker threads in the virtio-remote internal
- * pool. These workers are unrelated to the device IOThreads: resp fds are
- * hashed onto them (vq_nr % VIRTIO_REMOTE_RESP_WORKERS), so several vqs can
- * share one worker. A worker handles one fd at a time; extra events are
- * skipped by the distributor and re-armed by the level-triggered epoll.
+ * Number of per-vq processing worker threads in the virtio-remote internal
+ * pool. These workers are unrelated to the device IOThreads: both the host
+ * notifiers and the resp fds are hashed onto them (vq_nr %
+ * VIRTIO_REMOTE_RESP_WORKERS), so a vq's kick and its responses always land on
+ * the same worker and several vqs can share one worker. A worker handles one
+ * event at a time; extra events are skipped by the distributor and re-armed by
+ * the level-triggered epoll.
  */
 #define VIRTIO_REMOTE_RESP_WORKERS 4
 
@@ -126,6 +128,13 @@ static inline int check_env(int tar_env)
 * vdev that originally use aio will use aio_attach in virtio.c
 */
 int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
+
+/*
+* called in local qemu, registered as the io_read handler of every host
+* notifier (mosaic devices): a kick is dispatched to the worker that owns the
+* vq (the same worker as its resp socket), never processed on the iothread
+*/
+void local_notifier_distributor(EventNotifier *n);
 
 /*
 * called by local qemu in aio iothread

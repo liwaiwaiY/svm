@@ -595,30 +595,40 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp)
 static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem);
 
 /*
+ * Shared kick/resp dispatcher core (defined with the worker pool below).
+ * Hands a vq task to the single worker that owns the vq; returns false if the
+ * worker is busy (the caller must then leave the event source untouched so the
+ * level-triggered epoll re-arms it).
+ */
+static bool dispatcher_enqueue(VirtQueue *vq, void (*fn)(void *opaque));
+
+/* worker task: retry the parked elem, then pop and send the vring */
+static void local_worker_output(void *opaque);
+
+/*
 * called by io_write event, registered in local_send_msg
-* when kernel refuse to send because of lack of buffers, this handler will
-* be invoked when there are free buffers.
+* when the kernel refuses to send because of lack of buffers, this handler is
+* invoked once the socket becomes writable. The vring must only be touched by
+* the vq's worker thread, so this iothread-side handler only hands the vq back
+* to its worker (which retries the parked elem and drains the vring inside
+* local_handle_output). If the worker is busy the io_write handler is kept, so
+* the level-triggered G_IO_OUT re-fires once the socket is writable again.
 */
 static void local_retry_send(void *opaque)
 {
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
-    VirtQueueElement *elem = ctx->pending_elem;
-    if (elem) {
-        ctx->pending_elem = NULL;
-        if (!local_send_msg(vq, elem)) {
-            /* not enough for the elem: keep waiting for the next writable event */
-            ctx->pending_elem = elem;
-            return;
-        }
+
+    if (!dispatcher_enqueue(vq, local_worker_output)) {
+        /* worker busy: keep io_write registered; it will re-fire */
+        return;
     }
+    /* the worker retries the parked elem; drop the writable handler */
     AioContext *ctx_aio = vq_get_aio_ctx(vq);
     if (ctx_aio) {
         aio_set_fd_handler(ctx_aio, ctx->resp_fd,
                            local_response_distributor, NULL, NULL, NULL, vq);
     }
-    // continue to handle this vq
-    local_handle_output(vq, virtqueue_get_remote_ctx(vq));
 }
 
 /*
@@ -670,8 +680,8 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
      * still queued, so the bookkeeping below is always correct.
      */
     if (!ctx->zc) {
-        /* first send on this vq: enable MSG_ZEROCOPY. Runs on the socket
-         * iothread, the same thread that owns the zc state otherwise. */
+        /* first send on this vq: enable MSG_ZEROCOPY. Runs on the vq's
+         * worker thread, the same thread that owns the zc state otherwise. */
         ctx->zc = zc_enable(ctx->resp_fd);
     }
     ZcFdState *st = ctx->zc;
@@ -815,11 +825,19 @@ void local_distributor(EventNotifier *n)
 
 void local_handle_output(VirtQueue *vq, RemoteVQueueCtx *ctx)
 {
-    if (!ctx || ctx->pending_elem) {
-        /* an elem is already deferred for a send retry: don't pop more
-         * (their payloads would not be sent and the elem would leak); the
-         * writable handler drains the vq once the send goes out */
+    if (!ctx) {
         return;
+    }
+    /* an elem is parked on the socket being full: retry it before popping
+     * more, otherwise the vring would be drained past the parked elem */
+    if (ctx->pending_elem) {
+        VirtQueueElement *elem = ctx->pending_elem;
+        ctx->pending_elem = NULL;
+        if (!local_send_msg(vq, elem)) {
+            /* socket still full: re-park; the writable handler re-arms us */
+            ctx->pending_elem = elem;
+            return;
+        }
     }
     /* drain the vring: pop and submit as many elems as possible without
      * blocking the aio loop */
@@ -1069,21 +1087,30 @@ conn_err:
 /* -------------- Local QEMU Resp Distributor ------------- */
 
 /*
- * Internal resp-processing thread pool, unrelated to the device IOThreads.
- * The distributor (running on the socket iothread) receives a resp fd event
- * and hands it to the worker that owns the fd's vq; the worker then runs the
- * ordinary local_response_handler() on its own thread. One worker handles one
- * fd at a time: when the worker is busy the distributor skips the event, and
+ * Internal per-vq processing thread pool, unrelated to the device IOThreads.
+ * Both event sources of a vq - the host-notifier kick (local_notifier_
+ * distributor) and the resp socket (local_response_distributor) - are hashed
+ * onto the SAME worker (vq_nr % VIRTIO_REMOTE_RESP_WORKERS) by one shared
+ * dispatcher core, so one vq is always processed by exactly one worker thread
+ * and its virtqueue_pop()/virtqueue_push() can never run concurrently. The
+ * worker runs the handed-over task (local_handle_output for a kick,
+ * local_response_handler for a resp) on its own thread. One worker handles one
+ * task at a time: when the worker is busy the distributor skips the event and
  * the level-triggered epoll re-arms it on a later round. The per-vq state in
- * RemoteVQueueCtx is only touched by that vq's two owner threads (socket
- * iothread for sends, this worker for responses), serialized by ctx->lock.
+ * RemoteVQueueCtx is therefore only touched by this one worker thread, plus
+ * the distributor thread for the handoff (guarded by the busy claim).
  */
+typedef struct RemoteWorkerTask {
+    VirtQueue *vq;            /* the vq to process (written by distributor) */
+    void (*fn)(void *opaque); /* task to run on the worker for this event */
+} RemoteWorkerTask;
+
 typedef struct RemoteRespWorker {
     AioContext *ctx;          /* this worker's event loop */
     QEMUBH *bh;               /* distributor -> worker handoff */
     QemuThread thread;
-    VirtQueue *vq;            /* the vq handed over (written by distributor) */
-    int busy_fd;              /* fd currently handled, -1 if idle (qatomic) */
+    RemoteWorkerTask task;    /* handoff, written by distributor, read by BH */
+    int busy;                 /* 1 while a task is running (qatomic) */
 } RemoteRespWorker;
 
 static RemoteRespWorker *resp_workers;
@@ -1113,7 +1140,7 @@ static void resp_workers_ensure(void)
             RemoteRespWorker *w = &resp_workers[i];
             w->ctx = aio_context_new(&error_abort);
             aio_context_set_poll_params(w->ctx, 0, 0, 0, &error_abort);
-            w->busy_fd = -1;
+            w->busy = 0;
             w->bh = aio_bh_new(w->ctx, resp_worker_bh, w);
             qemu_thread_create(&w->thread, "virtio-remote-resp",
                                resp_worker_thread, w, QEMU_THREAD_JOINABLE);
@@ -1130,41 +1157,89 @@ static RemoteRespWorker *resp_worker_for_vq(VirtQueue *vq)
 }
 
 /*
- * Runs on a resp worker thread. Executes the ordinary response handler, which
- * drains the socket to EAGAIN, then releases the worker for the next event.
+ * Runs on a worker thread. Executes the task handed over by the distributor
+ * (response processing or vq output draining), then releases the worker for
+ * the next event.
  */
 static void resp_worker_bh(void *opaque)
 {
     RemoteRespWorker *w = opaque;
-    VirtQueue *vq = w->vq;
 
-    local_response_handler(vq);
-    qatomic_set(&w->busy_fd, -1);
+    w->task.fn(w->task.vq);
+    qatomic_set(&w->busy, 0);
 }
 
 /*
- * io_read handler of every local resp fd. Instead of processing the response
- * inline, it picks the resp worker of the fd's vq and hands the work over:
- * the response bytes are then parsed (and the used ring pushed) on the
- * worker's thread, so several vqs can progress in parallel. A busy worker is
- * skipped - the fd stays level-triggered and the next epoll round retries.
+ * Shared distributor core for both event sources of a vq: the host-notifier
+ * kick and the resp socket. Resolves the vq's worker with the same hash for
+ * both sources, claims it, and schedules the task on its thread. Returns false
+ * when the worker is already busy: the caller must then leave the event source
+ * untouched (eventfd not cleared / socket not drained), so the level-triggered
+ * epoll re-arms it on a later round. Runs on the socket iothread.
  */
-void local_response_distributor(void *opaque)
+static bool dispatcher_enqueue(VirtQueue *vq, void (*fn)(void *opaque))
 {
-    VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     RemoteRespWorker *w;
 
     if (!ctx) {
-        return;
+        return false;
     }
     w = resp_worker_for_vq(vq);
-    if (qatomic_cmpxchg(&w->busy_fd, -1, ctx->resp_fd) != -1) {
-        /* worker busy: skip this event, it will be re-armed */
-        return;
+    if (qatomic_cmpxchg(&w->busy, 0, 1) != 0) {
+        return false; /* worker busy: skip this event, it will be re-armed */
     }
-    w->vq = vq;
+    w->task.vq = vq;
+    w->task.fn = fn;
     qemu_bh_schedule(w->bh);
+    return true;
+}
+
+/*
+ * Worker task of the kick path. The kick eventfd is only cleared here, at the
+ * start of the drain that consumes the kicked requests. Clearing it on the
+ * iothread would race with a kick arriving after this drain already popped the
+ * ring: the clear would consume that kick while its vring entries are left
+ * unpopped and the guest (waiting for the completion) kicks no more. Any kick
+ * that reaches the eventfd after this clear leaves the counter non-zero, so
+ * the level-triggered epoll re-fires and the vq is drained again.
+ */
+static void local_worker_output(void *opaque)
+{
+    VirtQueue *vq = opaque;
+
+    event_notifier_test_and_clear(virtqueue_get_host_notifier(vq));
+    local_handle_output(vq, virtqueue_get_remote_ctx(vq));
+}
+
+/*
+ * io_read handler of every host notifier (mosaic devices, runs on the device
+ * iothread). A guest kick must pop the vring on the vq's worker thread, so the
+ * kick is handed to the same worker that owns the resp socket of this vq -
+ * never processed inline here. The eventfd is left untouched: it is cleared by
+ * the worker task that drains the vring, so a kick that arrives while the
+ * worker is busy is re-armed by the level-triggered epoll instead of being
+ * dropped.
+ */
+void local_notifier_distributor(EventNotifier *n)
+{
+    VirtQueue *vq = host_notifier_to_vq(n);
+
+    dispatcher_enqueue(vq, local_worker_output);
+}
+
+/*
+ * io_read handler of every local resp fd. Instead of processing the response
+ * inline, it hands the work to the worker that owns the fd's vq: the response
+ * bytes are parsed (and the used ring pushed) on the worker's thread, so
+ * several vqs can progress in parallel. A busy worker is skipped - the fd
+ * stays level-triggered and the next epoll round retries.
+ */
+void local_response_distributor(void *opaque)
+{
+    VirtQueue *vq = opaque;
+
+    dispatcher_enqueue(vq, local_response_handler);
 }
 
 // to review
