@@ -2666,6 +2666,7 @@ void virtio_delete_queue(VirtQueue *vq)
     vq->handle_output = NULL;
     // cmsvm
     if (vq->remote_ctx) { // remote_stub
+        remote_vq_ctx_destroy(vq->remote_ctx);
         g_free(vq->remote_ctx);
         vq->remote_ctx = NULL;
     }
@@ -4024,7 +4025,6 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
     AioPollFn *cb_io_poll = virtio_queue_host_notifier_aio_poll;
     EventNotifierHandler *cb_poll_ready = virtio_queue_host_notifier_aio_poll_ready;
-    bool poll_notifier = true;
 
     if (unlikely(is_mosaic(vq->vdev))) {
         /*
@@ -4037,18 +4037,15 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
         cb_io_read = local_notifier_distributor;
         cb_io_poll = NULL;
         cb_poll_ready = NULL;
-        poll_notifier = false;
     }
 
-    aio_set_event_notifier(ctx, &vq->host_notifier,
-                           cb_io_read,
-                           cb_io_poll,
-                           cb_poll_ready);
-    if (poll_notifier) {
-        aio_set_event_notifier_poll(ctx, &vq->host_notifier,
+    aio_set_event_notifier(ctx, &vq->host_notifier, cb_io_read,
+                           cb_io_poll, cb_poll_ready);
+
+    // mosaic: set poll_max_ns = 0, this is ineffective for mosaic
+    aio_set_event_notifier_poll(ctx, &vq->host_notifier,
                                     virtio_queue_host_notifier_aio_poll_begin,
                                     virtio_queue_host_notifier_aio_poll_end);
-    }
 
     /*
      * We will have ignored notifications about new requests from the guest
@@ -4074,7 +4071,7 @@ void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ct
     // cmsvm
     void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
     if (unlikely(check_virtio_device_remote(vq->vdev))) {
-        cb_io_read = local_distributor;
+        cb_io_read = local_notifier_distributor;
     }
 
     aio_set_event_notifier(ctx, &vq->host_notifier,
@@ -4245,6 +4242,7 @@ static void virtio_device_free_virtqueues(VirtIODevice *vdev)
         // virtio_remote_ctx_free(vdev->vq[i]);
         if (vdev->vq[i].remote_ctx) {
             RemoteVQueueCtx *remote_ctx = vdev->vq[i].remote_ctx;
+            remote_vq_ctx_destroy(remote_ctx);
             g_free(remote_ctx);
             vdev->vq[i].remote_ctx = NULL;
         }
@@ -4438,8 +4436,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 
         if (!vq->remote_ctx) {
             vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
-            g_mutex_init(&((RemoteVQueueCtx *)vq->remote_ctx)->lock);
-            g_queue_init(&((RemoteVQueueCtx *)vq->remote_ctx)->pending);
+            remote_vq_ctx_init(vq->remote_ctx, vq->vring.num);
         }
         RemoteVQueueCtx *ctx = vq->remote_ctx;
 
@@ -4448,6 +4445,8 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
             goto fail;
         }
         ctx->resp_fd = sockets[vq_idx];
+        /* the send worker must know this vq to replay busy-absorbed kicks */
+        remote_worker_register_vq(vq);
 
         // 3. set socket_fd to aio iothread
         int flags = fcntl(ctx->resp_fd, F_GETFL, 0);
@@ -4481,7 +4480,7 @@ fail:
         if (ctx->zc) {
             g_free(ctx->zc);
         }
-        g_mutex_clear(&ctx->lock);
+        remote_vq_ctx_destroy(ctx);
         virtqueue_set_remote_ctx(vq, NULL);
         g_free(ctx);
     }
