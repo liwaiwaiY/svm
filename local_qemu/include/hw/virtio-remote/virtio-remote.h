@@ -20,14 +20,17 @@ typedef struct iovec iovec;
 
 /*
  * Number of per-vq processing worker threads in the virtio-remote internal
- * pool. These workers are unrelated to the device IOThreads: there are two
- * pools (a send pool and a recv pool), each with VIRTIO_REMOTE_WORKERS
- * threads. A vq's host-notifier kick is hashed onto its send worker and every
- * resp is hashed onto its recv worker (vq_nr % VIRTIO_REMOTE_WORKERS), so one
- * vq is handled by two threads that run concurrently and are serialized on the
- * vq by vq_lock. Several vqs can share one worker. A worker handles one event
- * at a time; extra events are skipped by the distributor and re-armed by the
- * level-triggered epoll.
+ * pool. These workers are unrelated to the device IOThreads. A process is
+ * either the local side or the stub side (never both), and both sides use the
+ * same two pools: a send pool (outbound) and a recv pool (inbound), each with
+ * VIRTIO_REMOTE_WORKERS threads. Local: send pool drains kicks/retry-sends,
+ * recv pool parses responses. Stub: send pool does the resp sendmsg, recv
+ * pool parses requests and runs handle_output. A vq is hashed onto exactly
+ * one worker per pool (vq_nr % VIRTIO_REMOTE_WORKERS), so one vq is handled
+ * by two threads that run concurrently and are serialized on the vq by
+ * vq_lock (local) or by vq-internal serialization (stub). Several vqs can
+ * share one worker. A worker handles one event at a time; extra events are
+ * skipped by the distributor and re-armed by the level-triggered epoll.
  */
 #define VIRTIO_REMOTE_WORKERS 4
 
@@ -35,29 +38,28 @@ typedef struct RemoteVQueueCtx {
     int resp_fd;
     int vq_nr;
     unsigned int elem_index;
-    /* local: VirtQueueElement deferred for a send retry (socket was full) */
-    void *pending_elem;
     /* local: kick absorbed by the distributor while the send worker was busy;
      * a redrain of this vq is owed (qatomic, consumed by worker_bh) */
     int kick_pending;
-    /* local: the elem currently popped but not yet pushed (empty check) */
+    /* stub: the elem the device currently holds (set by pop(), cleared by
+     * its push()); the queue-empty decision is req_count, not this marker */
     void *elem;
 
-    /* stub: request window (distributor -> handle worker) and response window
-     * (handle worker -> send worker), both Inflight sized pow2ceil(vring.num).
-     * The Inflight head/tail are the seq allocator/consumer directly. */
-    void *req_win;
-    void *resp_win;
-    /* stub: per-request context of the elem currently being handled. vq-internal
-     * serialization guarantees at most one active elem at a time, so this single
-     * slot has no race (handle worker writes, pop reads). */
-    void *active_req;
-    /* stub: waits for the device's push() of the active elem (async
-     * handle_output). push_done is qatomic; push_cond wakes the handle worker
-     * and a push blocked on a full resp_win (backpressure). */
+    /* stub: requests parsed off the socket and waiting for the device to pop
+     * them. Private to the handle worker (the parser enqueues and the device
+     * pops on that same worker, so no locking is needed). in_handle is the
+     * handle_output re-entry guard (qatomic): set before call_handle_output,
+     * cleared by the device's push() on whichever thread it runs, so the IO of
+     * one batch overlaps the parsing of the next without two handle_outputs
+     * running at once. req_count lets a push (device thread) see at a glance
+     * whether requests piled up while the handle worker was blocked. */
+    GQueue *req_queue;
+    int in_handle;
+    int req_count;
+    /* stub: push_cond wakes the handle worker blocked on a full in-flight
+     * window (backpressure) and a push's drain/teardown wakeups. */
     GMutex push_lock;
     GCond push_cond;
-    bool push_done;
     /* stub: the connection is gone; workers must exit their current task and
      * never touch the windows again (qatomic) */
     bool dead;
@@ -72,34 +74,24 @@ typedef struct RemoteVQueueCtx {
     /*
      * cmsvm: per-vq processing state. On the local side a vq is owned by two
      * concurrent workers - the send worker (kick path) and the recv worker
-     * (resp path). vq_lock serializes every virtqueue access (pop/push/notify)
-     * and the shared pending_elem; inflight is the lock-free SPSC in-flight
+     * (resp path). vq_lock serializes every virtqueue access (pop/push/notify);
+     * inflight is the lock-free SPSC in-flight
      * window between the two workers (see virtio-remote.c). On the stub side
-     * the distributor (socket iothread), the handle worker and the send worker
-     * form a three-stage pipeline joined by the req_win/resp_win SPSC windows.
+     * the socket iothread is a pure dispatcher: it hands a vq to its handle
+     * worker (which parses the request stream and runs the device) or, for a
+     * bare POLLERR (zc completion), to its send worker. The handle worker and
+     * the send worker are joined by the same lock-free window (ctx->inflight).
      */
-    GMutex vq_lock;               /* serializes vq access and pending_elem */
-    void *inflight;               /* local: SPSC in-flight window (Inflight) */
-    void *recv;                   /* local: LocalRecvState of the resp stream */
+    GMutex vq_lock;               /* serializes vq access (pop/push/notify) */
+    void *inflight;               /* the one SPSC in-flight window (Inflight):
+                                     local (send worker -> recv worker) holds
+                                     VirtQueueElement* + zc bookkeeping; stub
+                                     (handle worker -> send worker) holds
+                                     StubResp*. Which side owns it is decided
+                                     by check_env() (see the stub window init) */
+    void *recv;                   /* local: LocalRecvState; stub: StubRecvState */
     void *zc;                     /* local/stub: MSG_ZEROCOPY state (ZcFdState) */
 } RemoteVQueueCtx;
-
-/*
-* called by virtio.c / remote_accept_handler: init the per-vq ctx. On the
-* local side vring_num is the vq's vring size (inflight window =
-* pow2ceil(vring_num)). On the stub side the distributor/send workers and the
-* req_win/resp_win SPSC windows are set up later by remote_accept_handler
-* (stub_ctx_init_windows), so vring_num is passed as 0 here and only the
-* mutexes/conds are initialized.
-*/
-void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num);
-
-/*
-* called at vq teardown (virtio_delete_queue / virtio_device_free_virtqueues /
-* the fail rollbacks): releases the parked pending_elem, the inflight window
-* and the vq_lock. Must run after the vq's workers have stopped.
-*/
-void remote_vq_ctx_destroy(RemoteVQueueCtx *ctx);
 
 /* -------------- Device States ------------- */
 
@@ -134,7 +126,7 @@ AioContext * local_search_aio_ctx(VirtIODevice *vdev);
 #define VIRTIO_LOCAL_ENV 0
 #define VIRTIO_REMOTE_ENV 1
 
-static int env_tag;
+int env_tag;
 
 /*
 * called in local qemu and remote stub
@@ -156,6 +148,30 @@ static inline int check_env(int tar_env)
     return env_tag == tar_env;
 }
 
+/*
+* called in local_Set_remote or remote_set_local
+* register necessary data structures
+*/
+void start_local_env(void);
+void start_remote_env(void);
+
+
+/*
+* called by virtio.c / remote_accept_handler: init the per-vq ctx. On the
+* local side vring_num is the vq's vring size (the in-flight window =
+* pow2ceil(vring_num)). On the stub side only the mutexes/conds are
+* initialized here (vring_num is passed as 0); the same window is set up
+* later by remote_accept_handler (stub_ctx_init_windows), which also marks
+* this TU as the stub side via chenv(VIRTIO_REMOTE_ENV).
+*/
+void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num);
+
+/*
+* called at vq teardown (virtio_delete_queue / virtio_device_free_virtqueues /
+* the fail rollbacks): releases the inflight window and the vq_lock. Must run
+* after the vq's workers have stopped.
+*/
+void remote_vq_ctx_destroy(RemoteVQueueCtx *ctx);
 
 /* -------------- Local QEMU Forwarding ------------- */
 
@@ -177,8 +193,6 @@ int local_connect_socket(const char *ip_port, int vq_nt, int *sockets,
 */
 bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 
-/* -------------- Remote Stub Forwarding ------------- */
-
 /* -------------- Local QEMU Handlers ------------- */
 
 /*
@@ -196,15 +210,6 @@ int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx
 void local_notifier_distributor(EventNotifier *n);
 
 /*
-* called by local qemu in local_set_remote after the per-vq ctx is up: tells
-* the vq's send worker about it, so the worker can replay the kicks absorbed
-* while it was busy (kick_pending) when it goes idle. Must be called during
-* machine setup, before any kick can be delivered (the list is read
-* lock-free by the worker).
-*/
-void remote_worker_register_vq(VirtQueue *vq);
-
-/*
 * called by local qemu, registered as the io_read handler of every resp fd:
 * receive an fd event, pick the resp worker of the fd's vq and hand the
 * response processing over to it. If the worker is already busy, the event is
@@ -212,9 +217,18 @@ void remote_worker_register_vq(VirtQueue *vq);
 */
 void local_response_distributor(void *opaque);
 
-/* -------------- Remote Stub Handlers ------------- */
+/* -------------- Local QEMU ThreadPool ------------- */
 
+/*
+* called by local qemu in local_set_remote after the per-vq ctx is up: tells
+* the vq's send worker about it, so the worker can replay the kicks absorbed
+* while it was busy (kick_pending) when it goes idle. Must be called during
+* machine setup, before any kick can be delivered (the list is read
+* lock-free by the worker).
+*/
+void local_register_vq(VirtQueue *vq);
 
+/* -------------- Remote Stub Forwarding ------------- */
 /*
 * used in remote stub in accept handler
 * to pass essential params
@@ -238,6 +252,29 @@ int remote_accept(const char *ip_port, Error **errp);
 * coordinate sockets for each vq
 */
 void remote_accept_handler(void *opaque);
+
+/* -------------- Remote Stub Handlers ------------- */
+
+/*
+* called by remote stub in socket iothread, registered in accept
+* when an req elem arrives, this function is called 
+*/
+void stub_distributor(void *opaque);
+
+
+/* -------------- Remote Stub ThreadPool ------------- */
+
+/*
+* called in remote stub at remote_accept_handler
+* register vq to workers
+*/
+void stub_register_vq(VirtQueue *vq);
+
+/*
+* called in remote stub when conn_err
+*/
+void stub_teardown_vq(VirtQueue *vq);
+
 
 /*
 * called by virtio.c on the remote stub side (vq->remote_ctx set):
@@ -275,5 +312,7 @@ bool check_virtio_device_remote(VirtIODevice *vdev);
 * called by virtio.c: true if vdev's responses are processed on an iothread
 */
 bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
+
+
 
 #endif /* VIRTIO_REMOTE */

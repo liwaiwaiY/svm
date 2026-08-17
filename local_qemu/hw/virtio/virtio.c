@@ -4446,7 +4446,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
         }
         ctx->resp_fd = sockets[vq_idx];
         /* the send worker must know this vq to replay busy-absorbed kicks */
-        remote_worker_register_vq(vq);
+        local_register_vq(vq);
 
         // 3. set socket_fd to aio iothread
         int flags = fcntl(ctx->resp_fd, F_GETFL, 0);
@@ -4463,6 +4463,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     register_mosaic(vdev);
     register_aio_ctx(vdev, aio_ctx);
     chenv(VIRTIO_LOCAL_ENV);
+    start_local_env();
 
     goto done;
 
@@ -4532,6 +4533,7 @@ static void remote_set_server(Object *obj, const char *ip_port, Error **errp)
     register_mosaic(VIRTIO_DEVICE(obj));
     register_aio_ctx(VIRTIO_DEVICE(obj), aio_ctx);
     chenv(VIRTIO_REMOTE_ENV);
+    start_remote_env();
 }
 
 static void virtio_device_class_init(ObjectClass *klass, const void *data)
