@@ -1045,7 +1045,13 @@ static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOBlock *s = (VirtIOBlock *)vdev;
 
-    if (!s->ioeventfd_disabled && !s->ioeventfd_started) {
+    /* remote virtio (local/stub): the vq is driven over the TCP channel - on
+     * the local side kicks are dispatched to the send worker via the host
+     * notifier, on the stub side handle_output runs on a worker thread
+     * without the BQL. The ioeventfd auto-start below (memory transaction +
+     * ioeventfd assign) must not run in either case. */
+    if (!virtqueue_get_remote_ctx(vq) &&
+        !s->ioeventfd_disabled && !s->ioeventfd_started) {
         /* Some guests kick before setting VIRTIO_CONFIG_S_DRIVER_OK so start
          * ioeventfd here instead of waiting for .set_status().
          */

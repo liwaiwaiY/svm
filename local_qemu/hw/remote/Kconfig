@@ -1,6 +1,9 @@
 config MULTIPROCESS
     bool
-    default y
+    # the multiprocess (hw/remote) code drives PCI proxy devices; only enable
+    # it for targets that actually have PCI, otherwise non-PCI targets (e.g.
+    # avr) link hw/remote objects that reference undefined pci_* symbols
+    default y if PCI
     select REMOTE_PCIHOST
 
 config VFIO_USER_SERVER

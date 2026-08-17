@@ -2808,7 +2808,7 @@ static void virtio_irq(VirtQueue *vq)
      * have already called ->set_guest_notifiers() sometime before calling this
      * function.
      */
-    if (qemu_in_iothread()) { // io thread has no BQL lock, so send event to main thread
+    if (qemu_in_iothread()) { // virtio-remote lies in iothread
         defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
     } else {
         virtio_notify_vector(vq->vdev, vq->vector);
@@ -2817,7 +2817,8 @@ static void virtio_irq(VirtQueue *vq)
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub no need for guest
+    // remote stub should skip notify
+    if (check_env(VIRTIO_REMOTE_ENV)) {
         return;
     }
 
@@ -2833,7 +2834,8 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 
 void virtio_notify_config(VirtIODevice *vdev)
 {
-    if (remote_virtio_notify_skip(vdev)) { // remote stub should skip
+    // mosaic: remote stub should skip notify_config
+    if (unlikely(check_env(VIRTIO_REMOTE_ENV))) {
         return;
     }
 
@@ -2843,17 +2845,7 @@ void virtio_notify_config(VirtIODevice *vdev)
     virtio_set_isr(vdev, 0x3);
     vdev->generation++;
 
-    // cmsvm
-    if (!check_virtio_device_remote(vdev)) { // local qemu
-        if (check_origin_qemu_in_iothread(vdev)) { // local qemu runs aio
-            defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
-        } else {
-            virtio_notify_vector(vdev, vdev->config_vector);
-        }
-        return;
-    }
-
-    if (qemu_in_iothread()) {
+    if (qemu_in_iothread()) { // local qemu is in iothread
         defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
     } else {
         virtio_notify_vector(vdev, vdev->config_vector);
@@ -4070,7 +4062,7 @@ void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ct
 
     // cmsvm
     void (*cb_io_read)(EventNotifier *n) = virtio_queue_host_notifier_read;
-    if (unlikely(check_virtio_device_remote(vq->vdev))) {
+    if (unlikely(is_mosaic(vq->vdev))) {
         cb_io_read = local_notifier_distributor;
     }
 
@@ -4344,7 +4336,7 @@ int virtio_device_start_ioeventfd(VirtIODevice *vdev)
 
 static void virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
 {
-    if (check_virtio_device_remote(vdev)) {
+    if (unlikely(is_mosaic(vdev))) {
         return remote_virtio_device_stop_ioeventfd_impl(vdev);
     }
 
@@ -4426,6 +4418,10 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     if (socket < 0)
         goto done;
 
+    /* worker pools must be up before any vq registers its send worker
+     * (local_register_vq below dereferences send_pool.workers) */
+    start_local_env();
+
     /* sockets[]/dst[] are sized by vq_nt, so index them by vq count */
     int vq_idx = 0;
     for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
@@ -4463,7 +4459,6 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     register_mosaic(vdev);
     register_aio_ctx(vdev, aio_ctx);
     chenv(VIRTIO_LOCAL_ENV);
-    start_local_env();
 
     goto done;
 

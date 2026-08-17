@@ -50,6 +50,21 @@
 
 /* -------------- Device States ------------- */
 
+/* the single definition backing the header's extern (see virtio-remote.h) */
+int env_tag;
+
+void chenv(int new_env)
+{
+    if (new_env != VIRTIO_LOCAL_ENV && new_env != VIRTIO_REMOTE_ENV)
+        return;
+    env_tag = new_env;
+}
+
+int check_env(int tar_env)
+{
+    return env_tag == tar_env;
+}
+
 static GHashTable *mosaic;
 
 void register_mosaic(VirtIODevice *vdev)
@@ -84,42 +99,6 @@ AioContext * local_search_aio_ctx(VirtIODevice *vdev)
 static AioContext *vq_get_aio_ctx(VirtQueue *vq)
 {
     return local_search_aio_ctx(virtqueue_get_vdev(vq));
-}
-
-/* -------------- Environments 1 ------------- */
-
-void start_local_env(void)
-{
-    worker_pool_init(&send_pool, "v-send", true, local_dispatch, local_worker_bh);
-    worker_pool_init(&recv_pool, "v-recv", false, local_dispatch, local_worker_bh);
-}
-
-void start_remote_env(void)
-{
-    worker_pool_init(&send_pool, "s-send", false, stub_dispatch, stub_worker_bh);
-    worker_pool_init(&recv_pool, "s-recv", false, stub_dispatch, stub_worker_bh);
-}
-
-void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num)
-{
-    g_mutex_init(&ctx->vq_lock);
-    g_mutex_init(&ctx->push_lock);
-    g_cond_init(&ctx->push_cond);
-    ctx->inflight = NULL;
-    ctx->req_queue = g_queue_new();
-    ctx->in_handle = 0;
-    ctx->req_count = 0;
-    ctx->dead = 0;
-    ctx->handle_busy = 0;
-    ctx->send_busy = 0;
-    ctx->send_writable = false;
-    if (vring_num > 0) {
-        Inflight *inf = g_new0(Inflight, 1);
-        inf->size = pow2ceil(vring_num);
-        inf->mask = inf->size - 1;
-        inf->slots = g_new0(InflightSlot, inf->size);
-        ctx->inflight = inf;
-    }
 }
 
 /* -------------- Pipelining ------------- */
@@ -568,7 +547,7 @@ struct WorkerPool {
     Worker *workers;          /* pool of VIRTIO_REMOTE_WORKERS workers */
     bool is_send;             /* pool flag: send-pool kick replay policy */
     PoolDispatch dispatch;    /* registered dispatch policy */
-    QEMUBHFunc bh;            /* registered worker bh */
+    QEMUBHFunc *bh;           /* registered worker bh */
     const char *name;         /* thread name prefix */
 };
 
@@ -630,10 +609,8 @@ static void worker_pool_register_vq(WorkerPool *pool, VirtQueue *vq)
 {
     Worker *w = worker_pool_worker(pool, vq);
 
-    g_mutex_lock(&pool->lock);
     for (unsigned int i = 0; i < w->n_vqs; i++) {
         if (w->vqs[i] == vq) {
-            g_mutex_unlock(&pool->lock);
             return; /* already registered */
         }
     }
@@ -642,7 +619,6 @@ static void worker_pool_register_vq(WorkerPool *pool, VirtQueue *vq)
         w->vqs = g_renew(VirtQueue *, w->vqs, w->vqs_cap);
     }
     w->vqs[w->n_vqs++] = vq;
-    g_mutex_unlock(&pool->lock);
 }
 
 /* common dispatch entry: submit one event to the vq's worker of the given
@@ -1345,6 +1321,46 @@ assign_err:
     return 0;
 }
 
+void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
+{
+    VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    AioContext *aio_ctx = local_search_aio_ctx(vdev);
+    int n, r;
+
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        VirtQueue *vq = virtio_get_queue(vdev, n);
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        virtio_queue_aio_detach_host_notifier(vq, aio_ctx);
+    }
+
+    /*
+     * Batch all the host notifiers in a single transaction to avoid
+     * quadratic time complexity in address_space_update_ioeventfds().
+     */
+    memory_region_transaction_begin();
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        r = virtio_bus_set_host_notifier(qbus, n, false);
+        assert(r >= 0);
+    }
+    /*
+     * The transaction expects the ioeventfds to be open when it
+     * commits. Do it now, before the cleanup loop.
+     */
+    memory_region_transaction_commit();
+
+    for (n = 0; n < VIRTIO_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+        virtio_bus_cleanup_host_notifier(qbus, n);
+    }
+}
+
 void local_notifier_distributor(EventNotifier *n)
 {
     VirtQueue *vq = host_notifier_to_vq(n);
@@ -1430,43 +1446,6 @@ static bool local_dispatch(WorkerPool *pool, VirtQueue *vq,
 void local_register_vq(VirtQueue *vq)
 {
     worker_pool_register_vq(&send_pool, vq);
-}
-
-// mosaic to review:
-
-/* true if any active vq of vdev carries a remote ctx: this process is the
- * remote stub for vdev (the local qemu side is marked by register_mosaic) */
-static bool stub_vdev_has_remote_vq(VirtIODevice *vdev)
-{
-    for (int n = 0; n < VIRTIO_QUEUE_MAX; n++) {
-        VirtQueue *vq = virtio_get_queue(vdev, n);
-        if (virtio_queue_get_num(vdev, n) && virtqueue_get_remote_ctx(vq)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool remote_virtio_notify_skip(VirtIODevice *vdev)
-{
-    /* the stub process has no guest to deliver the config interrupt to */
-    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
-}
-
-bool check_virtio_device_remote(VirtIODevice *vdev)
-{
-    /* the local qemu side is marked by register_mosaic; only the stub
-     * process (no mosaic marking) dispatches through the remote stubs */
-    return !is_mosaic(vdev) && stub_vdev_has_remote_vq(vdev);
-}
-
-bool check_origin_qemu_in_iothread(VirtIODevice *vdev)
-{
-    return local_search_aio_ctx(vdev) != NULL;
-}
-
-void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
-{
 }
 
 /* -------------- Remote Stub Forwarding  ------------- */
@@ -1684,14 +1663,14 @@ fail:
  * [vq_nr(4B)][elem_index(4B)][data_len(4B)][data...]; the in_sg payload
  * buffers are owned here until the send (or the zc completion) happens.
  */
-struct StubResp {
+typedef struct StubResp {
     int *header;          /* resp header, owned until sent */
     struct iovec *iov;    /* resp_iov: [header, in_sg...], owned until sent */
     int iov_cnt;
     unsigned int len;     /* resp payload length (zc threshold) */
     void **in_bufs;       /* bases of the in_sg payload buffers */
     unsigned int n_in_sg;
-};
+} StubResp;
 
 /* release a StubResp and its payload buffers. zc_deferred keeps the header,
  * iov and the first sent_sgs in buffers alive for a zc completion. */
@@ -1720,13 +1699,13 @@ static void stub_resp_free(StubResp *sr, unsigned int sent_sgs,
  * push() once the req has been popped (handed = true), otherwise by the
  * handle worker's teardown path.
  */
-struct StubReq {
+typedef struct StubReq {
     unsigned int elem_index;    /* seq echoed back in the resp */
     unsigned int out_num, in_num;
     struct iovec *out_sg;       /* out_num entries, buffers allocated */
     struct iovec *in_sg;        /* in_num entries, buffers allocated */
     bool handed;                /* pop() gave the buffers to the device */
-};
+} StubReq;
 
 /* release a StubReq. free_bufs also releases the payload buffers: only valid
  * for reqs never popped (once handed, the device's push() owns the buffers). */
@@ -1753,9 +1732,9 @@ static void stub_send_detach(VirtQueue *vq)
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
     Worker *w = worker_pool_worker(&send_pool, vq);
 
-    if (ctx && ctx->send_writable && ctx->resp_fd >= 0) {
+    if (ctx && ctx->send_full && ctx->resp_fd >= 0) {
         aio_set_fd_handler(w->ctx, ctx->resp_fd, NULL, NULL, NULL, NULL, NULL);
-        ctx->send_writable = false;
+        ctx->send_full = false;
     }
 }
 
@@ -1798,7 +1777,7 @@ static void stub_send_task(void *opaque)
         if (!sr) {
             break;
         }
-        if (ctx->send_writable) {
+        if (ctx->send_full) {
             /* socket still full: the parked writable handler retries */
             goto out;
         }
@@ -1822,7 +1801,7 @@ static void stub_send_task(void *opaque)
             /* send buffer full: keep the head parked and retry on writable.
              * The writable handler is registered on this worker's own aio
              * context, so the retry stays on the send worker. */
-            ctx->send_writable = true;
+            ctx->send_full = true;
             aio_set_fd_handler(w->ctx, fd, NULL, stub_send_writable,
                                NULL, NULL, vq);
             goto out;
@@ -1870,7 +1849,7 @@ static void stub_send_writable(void *opaque)
     if (!ctx) {
         return;
     }
-    ctx->send_writable = false;
+    ctx->send_full = false;
     aio_set_fd_handler(w->ctx, ctx->resp_fd, NULL, NULL, NULL, NULL, NULL);
     if (qatomic_load_acquire(&ctx->dead)) {
         return;
@@ -2159,6 +2138,7 @@ static void stub_handle_task(void *opaque)
              * re-dispatches this task if reqs piled up */
             continue;
         }
+        qatomic_set(&ctx->in_handle, 1);
         /* take the handle_output slot and drain the whole queue in one
          * batch. Only this worker ever sets in_handle (a push only clears
          * it), so the take-over below cannot race another caller; a stale
@@ -2170,7 +2150,6 @@ static void stub_handle_task(void *opaque)
          * in_handle inside the call, so after the batch the parse loop below
          * can take the slot again; an async device leaves it set and the
          * pushes that end the batch re-dispatch this task if reqs piled up. */
-        qatomic_set(&ctx->in_handle, 1);
         int before;
         while ((before = qatomic_load_acquire(&ctx->req_count)) > 0) {
             virtqueue_call_handle_output(vq); /* device pops (and pushes) */
@@ -2334,7 +2313,6 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz)
      * them, and its push() releases them); the iovec entries are copied
      * into the elem above, so the req shell can go right away */
     stub_req_free(req, false);
-    ctx->elem = (void *)ret;
     return ret;
 }
 
@@ -2395,7 +2373,6 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
     for (unsigned int i = 0; i < elem->out_num && elem->out_sg[i].iov_base; i++) {
         g_free(elem->out_sg[i].iov_base);
     }
-    ctx->elem = NULL;
 
     /* publish under push_lock: the re-check of dead closes the race with
      * conn_err tearing the windows down (it takes the same lock). */
@@ -2449,7 +2426,7 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
      * frees it), so a racing teardown cannot free it mid-read. */
     qatomic_store_release(&ctx->in_handle, 0);
     Inflight *win = ctx->inflight;
-    bool want_send = win && !ctx->send_writable &&
+    bool want_send = win && !ctx->send_full &&
                      qatomic_load_acquire(&win->head) <
                          qatomic_load_acquire(&win->tail);
     g_mutex_unlock(&ctx->push_lock);
@@ -2485,7 +2462,7 @@ static void stub_worker_bh(void *opaque)
             continue;
         }
         win = ctx->inflight;
-        if (win && !ctx->send_writable &&
+        if (win && !ctx->send_full &&
             qatomic_load_acquire(&win->head) < qatomic_load_acquire(&win->tail)) {
             worker_pool_dispatch(&send_pool, vq, stub_send_task, NULL);
         }
@@ -2594,7 +2571,45 @@ void stub_teardown_vq(VirtQueue *vq)
     }
 }
 
-/* -------------- Environments 2 ------------- */
+/* -------------- Environments ------------- */
+
+/* called by local_set_remote / remote_set_server (the virtio.c property
+ * setters): spin up the two worker pools with the side-specific dispatch
+ * policy and worker bh. Setup-time only, single-threaded. */
+void start_local_env(void)
+{
+    worker_pool_init(&send_pool, "v-send", true, local_dispatch, local_worker_bh);
+    worker_pool_init(&recv_pool, "v-recv", false, local_dispatch, local_worker_bh);
+}
+
+void start_remote_env(void)
+{
+    worker_pool_init(&send_pool, "s-send", false, stub_dispatch, stub_worker_bh);
+    worker_pool_init(&recv_pool, "s-recv", false, stub_dispatch, stub_worker_bh);
+}
+
+
+void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num)
+{
+    g_mutex_init(&ctx->vq_lock);
+    g_mutex_init(&ctx->push_lock);
+    g_cond_init(&ctx->push_cond);
+    ctx->inflight = NULL;
+    ctx->req_queue = g_queue_new();
+    ctx->in_handle = 0;
+    ctx->req_count = 0;
+    ctx->dead = 0;
+    ctx->handle_busy = 0;
+    ctx->send_busy = 0;
+    ctx->send_full = false;
+    if (vring_num > 0) {
+        Inflight *inf = g_new0(Inflight, 1);
+        inf->size = pow2ceil(vring_num);
+        inf->mask = inf->size - 1;
+        inf->slots = g_new0(InflightSlot, inf->size);
+        ctx->inflight = inf;
+    }
+}
 
 /* vq-level destroy: every ctx free site goes through here. Must run after the
  * vq's workers have stopped: the inflight window is torn down under vq_lock
@@ -2614,6 +2629,15 @@ void remote_vq_ctx_destroy(RemoteVQueueCtx *ctx)
         g_free(inf->slots);
         g_free(inf);
         ctx->inflight = NULL;
+    }
+    /* local side: drop the half-parsed resp state and the zc state (both are
+     * plain heap objects; the pending zc bufs were drained by
+     * local_zc_fd_teardown on conn_err, or are freed by inflight_reset) */
+    if (check_env(VIRTIO_LOCAL_ENV)) {
+        g_free(ctx->recv);
+        ctx->recv = NULL;
+        g_free(ctx->zc);
+        ctx->zc = NULL;
     }
     g_mutex_unlock(&ctx->vq_lock);
     /* stub side only (local leaves inflight/recv untouched): the slots hold

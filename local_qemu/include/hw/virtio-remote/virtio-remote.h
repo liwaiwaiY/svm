@@ -41,9 +41,6 @@ typedef struct RemoteVQueueCtx {
     /* local: kick absorbed by the distributor while the send worker was busy;
      * a redrain of this vq is owed (qatomic, consumed by worker_bh) */
     int kick_pending;
-    /* stub: the elem the device currently holds (set by pop(), cleared by
-     * its push()); the queue-empty decision is req_count, not this marker */
-    void *elem;
 
     /* stub: requests parsed off the socket and waiting for the device to pop
      * them. Private to the handle worker (the parser enqueues and the device
@@ -69,7 +66,7 @@ typedef struct RemoteVQueueCtx {
     bool send_busy;
     /* stub: a send worker writable handler is registered for this vq (the
      * socket is full). Owned by the vq's send worker; cleared on detach. */
-    bool send_writable;
+    bool send_full;
 
     /*
      * cmsvm: per-vq processing state. On the local side a vq is owned by two
@@ -126,27 +123,19 @@ AioContext * local_search_aio_ctx(VirtIODevice *vdev);
 #define VIRTIO_LOCAL_ENV 0
 #define VIRTIO_REMOTE_ENV 1
 
-int env_tag;
+extern int env_tag;
 
 /*
 * called in local qemu and remote stub
 * to change value of env
 */
-static inline void chenv(int new_env)
-{
-    if (new_env != VIRTIO_LOCAL_ENV && new_env != VIRTIO_REMOTE_ENV)
-        return;
-    env_tag = new_env;
-}
+void chenv(int new_env);
 
 /*
 * called in local qemu and remote stub
 * to check the environment
 */
-static inline int check_env(int tar_env)
-{
-    return env_tag == tar_env;
-}
+int check_env(int tar_env);
 
 /*
 * called in local_Set_remote or remote_set_local
@@ -155,13 +144,12 @@ static inline int check_env(int tar_env)
 void start_local_env(void);
 void start_remote_env(void);
 
-
 /*
 * called by virtio.c / remote_accept_handler: init the per-vq ctx. On the
 * local side vring_num is the vq's vring size (the in-flight window =
 * pow2ceil(vring_num)). On the stub side only the mutexes/conds are
 * initialized here (vring_num is passed as 0); the same window is set up
-* later by remote_accept_handler (stub_ctx_init_windows), which also marks
+* later by remote_accept_handler (in the stub env), which also marks
 * this TU as the stub side via chenv(VIRTIO_REMOTE_ENV).
 */
 void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num);
@@ -201,6 +189,13 @@ bool local_connect_vq(int socket, const struct sockaddr_in *addr, Error **errp);
 * vdev that originally use aio will use aio_attach in virtio.c
 */
 int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *ctx);
+
+/*
+* called by local qemu in ioeventfd_impl (mosaic devices): undo
+* virtio_device_start_ioeventfd_impl_local - detach the aio host notifiers
+* and disable the per-vq ioeventfds
+*/
+void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev);
 
 /*
 * called by local qemu, registered as the io_read handler of every host
@@ -262,19 +257,11 @@ void remote_accept_handler(void *opaque);
 void stub_distributor(void *opaque);
 
 
-/* -------------- Remote Stub ThreadPool ------------- */
-
 /*
-* called in remote stub at remote_accept_handler
-* register vq to workers
+* called by virtio.c on the remote stub side: 1 if the buffered request of
+* this vq is still in flight (popped but not pushed)
 */
-void stub_register_vq(VirtQueue *vq);
-
-/*
-* called in remote stub when conn_err
-*/
-void stub_teardown_vq(VirtQueue *vq);
-
+bool remote_virtio_queue_empty(void *opaque);
 
 /*
 * called by virtio.c on the remote stub side (vq->remote_ctx set):
@@ -290,29 +277,17 @@ void *remote_stub_virtqueue_pop(VirtQueue *vq, size_t sz);
 void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                                 unsigned int len);
 
-/*
-* called by virtio.c on the remote stub side: 1 if the buffered request of
-* this vq is still in flight (popped but not pushed)
-*/
-bool remote_virtio_queue_empty(void *opaque);
+/* -------------- Remote Stub ThreadPool ------------- */
 
 /*
-* called by virtio.c: on the remote stub side the config interrupt has no
-* guest to deliver to, so it must be skipped
+* called in remote stub at remote_accept_handler
+* register vq to workers
 */
-bool remote_virtio_notify_skip(VirtIODevice *vdev);
+void stub_register_vq(VirtQueue *vq);
 
 /*
-* called by virtio.c: true if this process is the remote stub for vdev
-* (any active vq carries a remote ctx and vdev is not a mosaic device)
+* called in remote stub when conn_err
 */
-bool check_virtio_device_remote(VirtIODevice *vdev);
-
-/*
-* called by virtio.c: true if vdev's responses are processed on an iothread
-*/
-bool check_origin_qemu_in_iothread(VirtIODevice *vdev);
-
-
+void stub_teardown_vq(VirtQueue *vq);
 
 #endif /* VIRTIO_REMOTE */
