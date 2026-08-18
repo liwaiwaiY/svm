@@ -26,6 +26,7 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
+#include "hw/virtio-remote/virtio-remote.h"
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio.h"
 #include "system/address-spaces.h"
@@ -228,6 +229,20 @@ int virtio_bus_start_ioeventfd(VirtioBusState *bus)
     VirtIODevice *vdev = virtio_bus_get_device(bus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
     int r;
+
+    if (check_env(VIRTIO_REMOTE_ENV)) {
+        /*
+         * Remote stub: the vq is driven over the TCP channel, there is no
+         * guest to kick or to write DRIVER_OK, and handle_output may run on a
+         * worker thread without the BQL. ioeventfd setup would hit
+         * memory_region_transaction_commit()'s bql_locked() assertion, so
+         * refuse to start; devices fall back to userspace vq processing,
+         * which is exactly what the stub wants. This is defensive: device
+         * side (e.g. virtio_blk_handle_output) already gates the auto-start
+         * on check_env(VIRTIO_LOCAL_ENV).
+         */
+        return -ENOSYS;
+    }
 
     if (!k->ioeventfd_assign || !k->ioeventfd_enabled(proxy)) {
         return -ENOSYS;

@@ -13,6 +13,23 @@
 #include <string.h>
 #include <stdlib.h>
 
+/*
+ * Compile-time switch for the "vremote: " debug instrumentation. Define
+ * VR_DEBUG=1 (source default below, or pass -DVR_DEBUG=1 to the compiler)
+ * to keep the per-request error_report() traces; with VR_DEBUG=0 (default)
+ * the vr_debug() calls compile away entirely - no runtime cost, no log spam.
+ * Toggling the switch is the only thing needed to (re)enable debugging.
+ */
+#ifndef VR_DEBUG
+#define VR_DEBUG 0
+#endif
+
+#if VR_DEBUG
+#define vr_debug(...) error_report(__VA_ARGS__)
+#else
+#define vr_debug(...) do { } while (0)
+#endif
+
 typedef struct VirtQueue VirtQueue;
 typedef struct VirtIODevice VirtIODevice;
 typedef struct VirtQueueElement VirtQueueElement;

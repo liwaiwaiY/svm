@@ -840,7 +840,7 @@ static int virtio_queue_packed_empty(VirtQueue *vq)
 
 int virtio_queue_empty(VirtQueue *vq)
 {
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
+    if (unlikely(check_env(VIRTIO_REMOTE_ENV))) {
         return remote_virtio_queue_empty(vq->remote_ctx);
     }
 
@@ -942,7 +942,7 @@ static void virtqueue_unmap_sg(VirtQueue *vq, const VirtQueueElement *elem,
 void virtqueue_detach_element(VirtQueue *vq, const VirtQueueElement *elem,
                               unsigned int len)
 {
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
+    if (unlikely(check_env(VIRTIO_REMOTE_ENV))) {
         return;
     }
 
@@ -1129,12 +1129,6 @@ static void virtqueue_packed_fill_desc(VirtQueue *vq,
 void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx)
 {
-    // cmsvm
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // if backend uses batching, we don't use it
-        remote_stub_virtqueue_push(vq, elem, len);
-        return;
-    }
-
     trace_virtqueue_fill(vq, elem, len, idx);
 
     virtqueue_unmap_sg(vq, elem, len);
@@ -1273,7 +1267,7 @@ static void virtqueue_ordered_flush(VirtQueue *vq)
 
 void virtqueue_flush(VirtQueue *vq, unsigned int count)
 {
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) {
+    if (unlikely(check_env(VIRTIO_REMOTE_ENV))) {
         return;
     }
 
@@ -1295,7 +1289,7 @@ void virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len)
 {
     // cmsvm
-    if (vq->remote_ctx && !is_mosaic(vq->vdev)) { // remote stub in
+    if (unlikely(check_env(VIRTIO_REMOTE_ENV))) { // remote stub in
         remote_stub_virtqueue_push(vq, elem, len);
         return;
     }
@@ -1826,6 +1820,12 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
     address_space_cache_init_empty(&indirect_desc_cache);
 
     RCU_READ_LOCK_GUARD();
+    if (unlikely(is_mosaic(vq->vdev))) {
+        vr_debug("vremote: pop vq %d last=%u shadow=%u avail=%u inuse=%u num=%u",
+                     virtio_get_queue_index(vq), vq->last_avail_idx,
+                     vq->shadow_avail_idx, vring_avail_idx(vq), vq->inuse,
+                     vq->vring.num);
+    }
     if (virtio_queue_empty_rcu(vq)) {
         goto done;
     }
@@ -4018,7 +4018,7 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     AioPollFn *cb_io_poll = virtio_queue_host_notifier_aio_poll;
     EventNotifierHandler *cb_poll_ready = virtio_queue_host_notifier_aio_poll_ready;
 
-    if (unlikely(is_mosaic(vq->vdev))) {
+    if (unlikely(is_mosaic(vq->vdev) && check_env(VIRTIO_LOCAL_ENV))) {
         /*
          * virtio-remote: kicks are dispatched to the vq's worker thread (see
          * local_notifier_distributor), which must stay the only owner of the
@@ -4029,6 +4029,8 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
         cb_io_read = local_notifier_distributor;
         cb_io_poll = NULL;
         cb_poll_ready = NULL;
+        vr_debug("vremote: attach host notifier vq %d",
+                     virtio_get_queue_index(vq));
     }
 
     aio_set_event_notifier(ctx, &vq->host_notifier, cb_io_read,
@@ -4265,7 +4267,7 @@ static int virtio_device_start_ioeventfd_impl(VirtIODevice *vdev)
 {
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, n, r, err;
-    if (unlikely(is_mosaic(vdev))) { // stub has no guest, so check mosaic is enough
+    if (unlikely(is_mosaic(vdev))) {
         return virtio_device_start_ioeventfd_impl_local(vdev, local_search_aio_ctx(vdev));
     }
 
@@ -4417,6 +4419,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     int socket = local_connect_socket(ip_port, vq_nt, sockets, dst, errp);
     if (socket < 0)
         goto done;
+    vr_debug("vremote: negotiate ok, %d vqs", vq_nt);
 
     /* worker pools must be up before any vq registers its send worker
      * (local_register_vq below dereferences send_pool.workers) */
@@ -4452,6 +4455,8 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
         aio_set_fd_handler(aio_ctx, ctx->resp_fd,
                            local_response_distributor, NULL, NULL, NULL,
                            vq);
+        vr_debug("vremote: vq %d -> resp_fd %d registered", n,
+                     ctx->resp_fd);
         vq_idx++;
     }
 
@@ -4459,6 +4464,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
     register_mosaic(vdev);
     register_aio_ctx(vdev, aio_ctx);
     chenv(VIRTIO_LOCAL_ENV);
+    vr_debug("vremote: env=LOCAL ready, %d vqs online", vq_nt);
 
     goto done;
 

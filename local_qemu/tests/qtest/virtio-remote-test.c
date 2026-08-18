@@ -109,6 +109,8 @@ static Stub *stub_start(int port, const char *img_path)
     char *argv[] = {
         g_strdup(stub_path),
         g_strdup("-nodefaults"),
+        g_strdup("-display"),
+        g_strdup("none"),
         g_strdup("-device"),
         g_strdup(dev_opts),
         g_strdup("-drive"),
@@ -184,6 +186,10 @@ static uint8_t blk_req(QVirtioDevice *dev, QVirtQueue *vq,
     qvirtqueue_kick(qts, dev, vq, free_head);
 
     qvirtio_wait_used_elem(qts, dev, vq, free_head, NULL, TIMEOUT_US);
+    if (type == VIRTIO_BLK_T_IN) {
+        /* the device wrote the sector into guest RAM: copy it back out */
+        qtest_memread(qts, req_addr + 16, data, SECTOR_SIZE);
+    }
     status = qtest_readb(qts, req_addr + 16 + SECTOR_SIZE);
     guest_free(alloc, req_addr);
     return status;

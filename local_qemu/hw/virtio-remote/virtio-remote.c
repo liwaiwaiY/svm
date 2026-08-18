@@ -192,6 +192,9 @@ static void inflight_publish(Inflight *inf, unsigned int seq, void *elem,
 {
     InflightSlot *slot;
 
+    vr_debug("vremote: inflight pub seq=%u head=%u tail=%u",
+             seq, qatomic_load_acquire(&inf->head),
+             qatomic_load_acquire(&inf->tail));
     assert(inf && seq - qatomic_load_acquire(&inf->head) < inf->size);
     slot = inflight_slot(inf, seq);
     slot->elem = elem;
@@ -236,6 +239,8 @@ static void inflight_clear(Inflight *inf, unsigned int seq)
         head++; // clear holes
     }
     qatomic_store_release(&inf->head, head);
+    vr_debug("vremote: inflight clear seq=%u head->%u tail=%u", seq, head,
+             tail);
 }
 
 /* teardown: release every still-in-flight elem/buf and reset the window.
@@ -310,11 +315,17 @@ static ZcFdState *zc_enable(int fd)
  * slot is kept for the response handler, otherwise the used-ring push happens
  * now. Runs on the recv worker, lock-free except for the push itself.
  */
+/* window space frees up on the recv side: wake the vq's send worker to drain
+ * the vring again (defined after local_send_handler) */
+static void local_drain_wake(VirtQueue *vq);
+
 static bool local_zc_complete_one(RemoteVQueueCtx *ctx, VirtQueue *vq,
                                   InflightSlot *slot)
 {
     VirtQueueElement *elem = slot->elem;
 
+    vr_debug("vremote: zc one seq=%u len_known=%d", slot->seq,
+             slot->zc.len_known);
     /* free the buffers the network stack no longer references */
     inflight_free_bufs(slot);
 
@@ -330,6 +341,7 @@ static bool local_zc_complete_one(RemoteVQueueCtx *ctx, VirtQueue *vq,
     g_mutex_unlock(&ctx->vq_lock);
     g_free(elem);
     inflight_clear(ctx->inflight, slot->seq);
+    local_drain_wake(vq);
     return true;
 }
 
@@ -371,6 +383,8 @@ static void local_zc_drain(RemoteVQueueCtx *ctx, VirtQueue *vq)
             /* snapshot the window once per completion */
             uint32_t head = qatomic_load_acquire(&inf->head);
             uint32_t tail = qatomic_load_acquire(&inf->tail);
+            vr_debug("vremote: zc comp first=%u last=%u scan head=%u tail=%u",
+                     first, last, head, tail);
             for (uint32_t seq = head; seq < tail; seq++) {
                 InflightSlot *slot = inflight_slot(inf, seq);
                 bool hit;
@@ -920,6 +934,11 @@ static void local_retry_send(void *opaque)
     VirtQueue *vq = opaque;
     RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
 
+    if (ctx && qatomic_load_acquire(&ctx->dead)) {
+        /* the stub is gone: never re-register the resp fd handler here - the
+         * conn_err BH detaches (and closes) the fd */
+        return;
+    }
     if (!worker_pool_dispatch(&send_pool, vq, local_send_handler, NULL)) {
         /* worker busy: keep io_write registered; it will re-fire */
         return;
@@ -944,6 +963,8 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
     }
     int vq_nr = virtio_get_queue_index(vq);
     int seq = ctx->elem_index++;
+    vr_debug("vremote: local send vq %d seq %d out=%u in=%u", vq_nr, seq,
+                 elem->out_num, elem->in_num);
 
     iovec *msg_sg = g_new0(iovec, elem->out_num + 2);
     int *header = g_new0(int, 4);
@@ -986,51 +1007,77 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
         ctx->zc = zc_enable(ctx->resp_fd);
     }
     ZcFdState *st = ctx->zc;
-    bool used_zc = false;
     ssize_t ret;
-    if (st && st->enabled && total >= ZC_SEND_MIN) {
-        ret = sendmsg(ctx->resp_fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
-        if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
-            /* kernel refuses zc for this call: fall back to a copy send */
-            ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
-        } else if (ret > 0) {
-            used_zc = true;
-        }
-    } else {
-        ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
-    }
+    bool used_zc = false;
+    bool zc_eligible = st && st->enabled && total >= ZC_SEND_MIN;
+    uint32_t zc_serial = 0;
 
-    if (used_zc) {
-        /*
-         * The kernel may still reference the header/lens and the guest's
-         * out buffers until the completion arrives, so keep them alive. The
-         * guest cannot reuse its out buffers until the used-ring push, and
-         * the push is deferred until the completion (see
-         * local_zc_complete_one / the response handler), which is exactly
-         * the ack from the stub. The elem is published into the lock-free
-         * in-flight window so the recv worker can match its response by seq.
-         */
-        void **bufs = g_new(void *, 3);
-        bufs[0] = header;
-        bufs[1] = lens;
-        bufs[2] = msg_sg;
+    /*
+     * Publish the slot BEFORE the send, on every path. The stub can respond
+     * as soon as the request bytes hit the socket, and a zc completion can
+     * be drained as soon as sendmsg() returns; publishing only afterwards
+     * lets the recv worker match a resp/completion against a window that
+     * does not contain this seq yet, losing it forever (the slot never
+     * completes -> head stalls -> window overflow -> "no pending elem" /
+     * publish assert). With the slot published first the recv worker always
+     * finds it. On a failed send the slot is left as a hole below (head
+     * skips it), and the zc serial is handed back.
+     */
+    if (zc_eligible) {
+        void **zc_bufs = g_new(void *, 3);
+        zc_bufs[0] = header;
+        zc_bufs[1] = lens;
+        zc_bufs[2] = msg_sg;
         ZcPending zc = {
-            .serial = st->serial++,
-            .bufs = bufs,
+            .bufs = zc_bufs,
             .n_bufs = 3,
             .push_len = 0,
             .len_known = elem->in_num == 0,
         };
         g_mutex_lock(&ctx->vq_lock);
+        zc.serial = st->serial++;
         inflight_publish(ctx->inflight, seq, elem, &zc);
         g_mutex_unlock(&ctx->vq_lock);
-        return true;
+        zc_serial = zc.serial;
+
+        ret = sendmsg(ctx->resp_fd, &msg, MSG_ZEROCOPY | MSG_NOSIGNAL);
+        if (ret < 0 && (errno == ENOBUFS || errno == EINVAL)) {
+            /* kernel refuses zc for this call: fall back to a copy send.
+             * No completion for zc_serial will ever be queued; the
+             * pre-published slot is converted to a plain one below. */
+            ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
+        } else if (ret > 0) {
+            used_zc = true;
+        }
+    } else {
+        /* plain copy send: publish first, for the same reason */
+        g_mutex_lock(&ctx->vq_lock);
+        inflight_publish(ctx->inflight, seq, elem, NULL);
+        g_mutex_unlock(&ctx->vq_lock);
+
+        ret = sendmsg(ctx->resp_fd, &msg, MSG_NOSIGNAL);
     }
-    g_free(lens);
-    g_free(header);
-    g_free(msg_sg);
+
+    vr_debug("vremote: local sent vq %d seq %d total=%zd ret=%zd %s",
+                 vq_nr, seq, total, ret, used_zc ? "zc" : "copy");
 
     if (ret < 0) {
+        /* roll back the pre-published slot: nothing was sent, so neither a
+         * resp nor a completion can reference this seq. Leaving it as a
+         * NULL hole (not rewinding tail) keeps head <= tail under all
+         * interleavings; the hole-advance in inflight_clear skips it. */
+        g_mutex_lock(&ctx->vq_lock);
+        InflightSlot *s = inflight_slot(ctx->inflight, seq);
+        inflight_free_bufs(s);
+        s->elem = NULL;
+        s->seq = 0;
+        s->is_zc = false;
+        s->zc = (ZcPending){0};
+        if (zc_eligible) {
+            st->serial = zc_serial; /* serial was never used */
+        }
+        g_mutex_unlock(&ctx->vq_lock);
+
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             /* send buffer full: give the elem back to the vring (rewind the
              * avail index + detach, under vq_lock like pop) and re-drain when
@@ -1054,21 +1101,46 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
         return false;
     }
 
+    if (used_zc) {
+        /* The slot is already published (pre-send); the kernel holds the
+         * header/lens/msg_sg and the guest's out buffers until the
+         * completion, which either pushes the used-ring entry now (resp
+         * already here, see the response handler) or defers the push until
+         * the resp arrives (see local_zc_complete_one). */
+        return true;
+    }
+
+    /* the copy send succeeded */
+    if (zc_eligible) {
+        /* the zc send was refused and the copy send took over: convert the
+         * pre-published zc slot to a plain one (no completion for zc_serial
+         * will ever be queued, and the header/lens/msg_sg are ours again) */
+        g_mutex_lock(&ctx->vq_lock);
+        InflightSlot *s = inflight_slot(ctx->inflight, seq);
+        inflight_free_bufs(s);
+        s->zc = (ZcPending){0};
+        s->is_zc = false;
+        st->serial = zc_serial;     /* serial was never used */
+        g_mutex_unlock(&ctx->vq_lock);
+    } else {
+        g_free(lens);
+        g_free(header);
+        g_free(msg_sg);
+    }
+
     if (elem->in_num == 0) {
         /* no in-buffers: the stub sends no resp for this request, so
          * complete the used-ring entry right away */
         g_mutex_lock(&ctx->vq_lock);
         virtqueue_push(vq, elem, 0);
         virtio_notify(virtqueue_get_vdev(vq), vq);
+        inflight_clear(ctx->inflight, seq);
         g_mutex_unlock(&ctx->vq_lock);
         g_free(elem);
         return true;
     }
 
-    /* track the in-flight elem so its response can be matched by seq */
-    g_mutex_lock(&ctx->vq_lock);
-    inflight_publish(ctx->inflight, seq, elem, NULL);
-    g_mutex_unlock(&ctx->vq_lock);
+    /* the pre-published slot stays for the response to match by seq */
     return true;
 }
 
@@ -1081,12 +1153,23 @@ static void local_send_handler(void *opaque)
     if (!ctx) {
         return;
     }
+    if (qatomic_load_acquire(&ctx->dead)) {
+        return; /* the stub is gone */
+    }
     /* drain the vring: pop and submit as many elems as possible without
      * blocking the aio loop. When the socket is full local_send_msg gives the
      * elem back to the vring (virtqueue_unpop) and arms the writable handler;
-     * the next drain pops it again in FIFO order. */
+     * the next drain pops it again in FIFO order. When the in-flight window
+     * is full we stop popping: the recv worker wakes this handler again once
+     * a response clears a slot (local_drain_wake), so the guest can never
+     * push more requests than the window can hold. */
     // to review: the same fd event will be lift up, may causing HoL, think about multiple aio iothread
     while (true) {
+        Inflight *inf = ctx->inflight;
+        if (inf && qatomic_load_acquire(&inf->tail) -
+                       qatomic_load_acquire(&inf->head) >= inf->size) {
+            break; /* in-flight window full: wait for a resp to clear it */
+        }
         g_mutex_lock(&ctx->vq_lock);
         elem = virtqueue_pop(vq, sizeof(VirtQueueElement));
         g_mutex_unlock(&ctx->vq_lock);
@@ -1097,6 +1180,17 @@ static void local_send_handler(void *opaque)
             break;
         }
     }
+}
+
+/*
+ * The in-flight window has space again (the recv worker consumed a resp or a
+ * zc completion that cleared a slot): re-drain the vring so requests parked
+ * behind a full window get sent. If the send worker is busy it is already
+ * draining and re-checks the window itself, so a lost claim here is safe.
+ */
+static void local_drain_wake(VirtQueue *vq)
+{
+    worker_pool_dispatch(&send_pool, vq, local_send_handler, NULL);
 }
 
 /*
@@ -1112,6 +1206,55 @@ typedef struct LocalRecvState {
     unsigned int cur_off; /* data bytes already written into in_sg */
     unsigned int need_len;    /* total data bytes expected */
 } LocalRecvState;
+
+/* -------------- Local Connection Loss ------------- */
+
+/* the stub is gone: the guest has no backend anymore, exit it. Runs on the
+ * main loop via a one-shot BH. */
+static void local_shutdown_bh(void *opaque)
+{
+    qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_ERROR);
+}
+
+/* detach the vq's resp fd handler and close the fd. Runs on the iothread that
+ * owns the aio handler via a one-shot BH: aio_set_fd_handler() must not be
+ * called from the recv worker that detected the EOF. */
+static void local_conn_lost_bh(void *opaque)
+{
+    VirtQueue *vq = opaque;
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+
+    if (ctx && ctx->resp_fd >= 0) {
+        AioContext *aio_ctx = vq_get_aio_ctx(vq);
+        if (aio_ctx) {
+            aio_set_fd_handler(aio_ctx, ctx->resp_fd,
+                               NULL, NULL, NULL, NULL, NULL);
+        }
+        close(ctx->resp_fd);
+        ctx->resp_fd = -1;
+    }
+}
+
+/* called by the recv worker from conn_err when the stub closed the connection:
+ * mark the vq dead (stops further dispatch work), detach the fd on the iothread
+ * and exit the guest. Without the detach the level-triggered EOF would keep
+ * re-awakening local_response_handler forever. */
+static void local_conn_lost(VirtQueue *vq)
+{
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
+
+    if (!ctx) {
+        return;
+    }
+    if (qatomic_xchg(&ctx->dead, 1)) {
+        return; /* already tearing down this vq */
+    }
+    AioContext *aio_ctx = vq_get_aio_ctx(vq);
+    if (aio_ctx) {
+        aio_bh_schedule_oneshot(aio_ctx, local_conn_lost_bh, vq);
+    }
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), local_shutdown_bh, NULL);
+}
 
 static void local_response_handler(void *opaque)
 {
@@ -1130,6 +1273,9 @@ static void local_response_handler(void *opaque)
     }
 
     while (true) {
+        if (qatomic_load_acquire(&ctx->dead)) {
+            return; /* the stub is gone; conn_err already handled the teardown */
+        }
         if (rs->stage == 0) {
             /* resp header: [vq_nr][elem_index][data_len], native endian */
             ssize_t n = recv(fd, rs->hdr + rs->hdr_off,
@@ -1171,6 +1317,9 @@ static void local_response_handler(void *opaque)
             rs->need_len = len;
             rs->cur_off = 0;
             rs->stage = 1;
+            if (seq == 0) {
+                vr_debug("vremote: vq %d first resp len=%d", vq_nr, len);
+            }
         }
 
         if (rs->stage == 1) {
@@ -1230,6 +1379,8 @@ static void local_response_handler(void *opaque)
              * reused before the NIC is done with them; copy-sent elems push
              * right away. Either way clear the in-flight slot afterwards. */
             VirtQueueElement *elem = rs->cur;
+            vr_debug("vremote: local resp vq %d seq %d len=%d",
+                         virtio_get_queue_index(vq), rs->cur_seq, rs->need_len);
             Inflight *inf = ctx->inflight;
             InflightSlot *slot = inf ? inflight_slot(inf, rs->cur_seq) : NULL;
             if (slot && slot->is_zc) {
@@ -1243,6 +1394,7 @@ static void local_response_handler(void *opaque)
                     g_mutex_unlock(&ctx->vq_lock);
                     g_free(elem);
                     inflight_clear(ctx->inflight, rs->cur_seq);
+                    local_drain_wake(vq);
                 } /* else {} wait local_zc_complete_one() to handle */
             } else {
                 /* copy-sent elem: push right away and clear the slot */
@@ -1252,6 +1404,7 @@ static void local_response_handler(void *opaque)
                 g_mutex_unlock(&ctx->vq_lock);
                 g_free(elem);
                 inflight_clear(ctx->inflight, rs->cur_seq);
+                local_drain_wake(vq);
             }
             rs->stage = 0;
             rs->hdr_off = 0;
@@ -1279,6 +1432,8 @@ conn_err:
     rs->hdr_off = 0;
     rs->cur_off = 0;
     rs->need_len = 0;
+    /* the stub is gone: exit the guest instead of looping on the EOF */
+    local_conn_lost(vq);
 }
 
 /* -------------- Local QEMU Handlers ------------- */
@@ -1287,6 +1442,7 @@ int virtio_device_start_ioeventfd_impl_local(VirtIODevice *vdev, AioContext *aio
 {
     VirtioBusState *qbus = VIRTIO_BUS(qdev_get_parent_bus(DEVICE(vdev)));
     int i, r;
+    vr_debug("vremote: start_ioeventfd_impl_local");
     memory_region_transaction_begin();
     for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
         if (!virtio_queue_get_num(vdev, i))
@@ -1364,11 +1520,19 @@ void remote_virtio_device_stop_ioeventfd_impl(VirtIODevice *vdev)
 void local_notifier_distributor(EventNotifier *n)
 {
     VirtQueue *vq = host_notifier_to_vq(n);
+    RemoteVQueueCtx *ctx = virtqueue_get_remote_ctx(vq);
 
+    if (ctx && qatomic_load_acquire(&ctx->dead)) {
+        /* the stub is gone: consume the kick so the level-triggered eventfd
+         * does not spin the iothread until the guest exits */
+        event_notifier_test_and_clear(n);
+        return;
+    }
     /* always consume the kick (success or busy): a successful claim's drain
      * covers it, a busy worker replays it via kick_pending once idle, so the
      * level-triggered eventfd does not keep waking the iothread */
     /* opaque = clear_kick: consume the notifier even if the claim fails */
+    vr_debug("vremote: kick vq %d", virtio_get_queue_index(vq));
     worker_pool_dispatch(&send_pool, vq, local_send_handler,
                          GINT_TO_POINTER(1));
 }
@@ -1808,6 +1972,9 @@ static void stub_send_task(void *opaque)
         }
         if (ret < 0) {
             error_report("remote stub: sendmsg resp failed: %s", strerror(errno));
+        } else {
+            vr_debug("vremote: stub send vq %d seq %u len %u",
+                         virtio_get_queue_index(vq), seq, sr->len);
         }
 
         unsigned int sgs = sr->iov_cnt - 1;
@@ -1985,6 +2152,8 @@ static StubReq *stub_recv_req(RemoteVQueueCtx *ctx, int fd)
             rs->out_sg = g_new0(struct iovec, rs->out_num);
             rs->in_sg = g_new0(struct iovec, rs->in_num);
             rs->stage = 1;
+            vr_debug("vremote: stub recv vq %d seq %d out=%u in=%u",
+                         vq_nr, rs->seq, rs->out_num, rs->in_num);
         }
 
         if (rs->stage == 1) {
@@ -2078,6 +2247,8 @@ static StubReq *stub_recv_req(RemoteVQueueCtx *ctx, int fd)
             req->in_sg = rs->in_sg;
             rs->out_sg = NULL;
             rs->in_sg = NULL;
+            vr_debug("vremote: stub req complete vq %d seq %d out=%u in=%u",
+                         ctx->vq_nr, rs->seq, req->out_num, req->in_num);
             stub_recv_state_reset(rs);
             return req;
         }
@@ -2103,6 +2274,33 @@ static StubReq *stub_recv_req(RemoteVQueueCtx *ctx, int fd)
  * returns. If reqs pile up while a batch is still in flight, the push that
  * ends it re-dispatches this task.
  */
+/* take the handle_output slot (in_handle must be 0) and drive the device
+ * through one batch of queued requests. Only this worker ever sets in_handle
+ * (a push only clears it), so the take-over cannot race another caller; a
+ * stale push clearing the flag mid-batch is impossible for sync devices and
+ * only softens the guard for async ones, which is safe because handle_output
+ * is serialized on this worker. pop() frees each req shell as the device
+ * dequeues it, so the loop just keeps driving the device until the queue is
+ * drained. A sync device's push clears in_handle inside the call, so after
+ * the batch the parse loop can take the slot again; an async device leaves
+ * it set and the pushes that end the batch re-dispatch this task if reqs
+ * piled up. */
+static void stub_drive_queue(VirtQueue *vq, RemoteVQueueCtx *ctx)
+{
+    int before;
+
+    qatomic_set(&ctx->in_handle, 1);
+    while ((before = qatomic_load_acquire(&ctx->req_count)) > 0) {
+        virtqueue_call_handle_output(vq); /* device pops (and pushes) */
+        if (qatomic_load_acquire(&ctx->dead)) {
+            break; /* teardown: stop feeding the device */
+        }
+        if (qatomic_load_acquire(&ctx->req_count) >= before) {
+            break; /* the device consumed nothing: stop driving it */
+        }
+    }
+}
+
 static void stub_handle_task(void *opaque)
 {
     VirtQueue *vq = opaque;
@@ -2121,6 +2319,18 @@ static void stub_handle_task(void *opaque)
         goto out;
     }
     for (;;) {
+        /* drain the queue before parsing: a re-dispatch (from the device's
+         * push) can arrive with requests already queued but nothing left on
+         * the socket, and those reqs must still be handed to the device.
+         * Otherwise the task would take the EAGAIN path below and strand
+         * them until the next readable event never comes. */
+        if (qatomic_load_acquire(&ctx->req_count) > 0 &&
+            !qatomic_load_acquire(&ctx->in_handle)) {
+            stub_drive_queue(vq, ctx);
+            if (qatomic_load_acquire(&ctx->dead)) {
+                break;
+            }
+        }
         StubReq *req = stub_recv_req(ctx, fd);
         if (!req) {
             break; /* EAGAIN (wait for the next readable event) or conn err */
@@ -2138,28 +2348,7 @@ static void stub_handle_task(void *opaque)
              * re-dispatches this task if reqs piled up */
             continue;
         }
-        qatomic_set(&ctx->in_handle, 1);
-        /* take the handle_output slot and drain the whole queue in one
-         * batch. Only this worker ever sets in_handle (a push only clears
-         * it), so the take-over below cannot race another caller; a stale
-         * push clearing the flag mid-batch is impossible for sync devices
-         * and only softens the guard for async ones, which is safe because
-         * handle_output is serialized on this worker. pop() frees each req
-         * shell as the device dequeues it, so this loop just keeps driving
-         * the device until the queue is drained. A sync device's push clears
-         * in_handle inside the call, so after the batch the parse loop below
-         * can take the slot again; an async device leaves it set and the
-         * pushes that end the batch re-dispatch this task if reqs piled up. */
-        int before;
-        while ((before = qatomic_load_acquire(&ctx->req_count)) > 0) {
-            virtqueue_call_handle_output(vq); /* device pops (and pushes) */
-            if (qatomic_load_acquire(&ctx->dead)) {
-                break; /* teardown: stop feeding the device */
-            }
-            if (qatomic_load_acquire(&ctx->req_count) >= before) {
-                break; /* the device consumed nothing: stop driving it */
-            }
-        }
+        stub_drive_queue(vq, ctx);
         if (qatomic_load_acquire(&ctx->dead)) {
             break;
         }
@@ -2366,6 +2555,8 @@ void remote_stub_virtqueue_push(VirtQueue *vq, const VirtQueueElement *elem,
             for (unsigned int i = 0; i < elem->in_num; i++) {
                 sr->in_bufs[i] = elem->in_sg[i].iov_base;
             }
+            vr_debug("vremote: stub push vq %d elem %u len %u",
+                         ctx->vq_nr, elem->index, len);
         }
     }
 
