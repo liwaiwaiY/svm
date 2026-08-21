@@ -1,0 +1,38 @@
+{
+    "dev": "crypto",
+    "command": "./speed",
+    "result": "
+Testing NULL cipher: 
+	Encrypting in chunks of 512 bytes: done. 9.11 GB in 5.00 secs: 1.82 GB/sec
+	Encrypting in chunks of 1024 bytes: done. 18.28 GB in 5.00 secs: 3.66 GB/sec
+	Encrypting in chunks of 2048 bytes: done. 31.70 GB in 5.00 secs: 6.34 GB/sec
+	Encrypting in chunks of 4096 bytes: done. 63.07 GB in 5.00 secs: 12.61 GB/sec
+	Encrypting in chunks of 8192 bytes: done. 113.32 GB in 5.00 secs: 22.66 GB/sec
+	Encrypting in chunks of 16384 bytes: done. 183.21 GB in 5.00 secs: 36.64 GB/sec
+	Encrypting in chunks of 32768 bytes: done. 270.09 GB in 5.00 secs: 54.02 GB/sec
+	Encrypting in chunks of 65536 bytes: done. 353.87 GB in 5.00 secs: 70.77 GB/sec
+
+Testing AES-128-CBC cipher: 
+	Encrypting in chunks of 512 bytes: done. 227.34 MB in 5.00 secs: 45.47 MB/sec
+	Encrypting in chunks of 1024 bytes: done. 440.50 MB in 5.00 secs: 88.10 MB/sec
+	Encrypting in chunks of 2048 bytes: done. 769.67 MB in 5.00 secs: 153.93 MB/sec
+	Encrypting in chunks of 4096 bytes: done. 1.52 GB in 5.00 secs: 0.30 GB/sec
+	Encrypting in chunks of 8192 bytes: done. 2.62 GB in 5.00 secs: 0.52 GB/sec
+	Encrypting in chunks of 16384 bytes: done. 4.03 GB in 5.00 secs: 0.81 GB/sec
+	Encrypting in chunks of 32768 bytes: done. 5.30 GB in 5.00 secs: 1.06 GB/sec
+	Encrypting in chunks of 65536 bytes: done. 6.11 GB in 5.00 secs: 1.22 GB/sec
+    "
+}
+
+{
+	"dev": "crypto",
+	"command": "openssl speed 0engine afalg aes-138-cbc",
+	"resulst": "
+type             16 bytes     64 bytes    256 bytes   1024 bytes   8192 bytes  16384 bytes
+aes-128-cbc      35218.08k   158067.20k   515616.58k  2439907.56k 26588938.24k 26766540.80k
+	"
+}
+
+{
+	
+}

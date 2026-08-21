@@ -27,6 +27,7 @@
 #include "system/system.h"
 #include "system/runstate.h"
 #include "hw/virtio/virtio-blk.h"
+#include "hw/virtio-remote/virtio-remote.h"
 #include "scsi/constants.h"
 #ifdef __linux__
 # include <scsi/sg.h>
@@ -1434,6 +1435,9 @@ static void virtio_blk_drained_begin(void *opaque)
 {
     VirtIOBlock *s = opaque;
 
+    vr_ev_log_ext(VR_EV_DRAINB,
+                  virtio_get_queue(VIRTIO_DEVICE(s), 0),
+                  s->ioeventfd_started, 0, 0);
     if (s->ioeventfd_started) {
         virtio_blk_ioeventfd_detach(s);
     }
@@ -1444,6 +1448,9 @@ static void virtio_blk_drained_end(void *opaque)
 {
     VirtIOBlock *s = opaque;
 
+    vr_ev_log_ext(VR_EV_DRAINE,
+                  virtio_get_queue(VIRTIO_DEVICE(s), 0),
+                  s->ioeventfd_started, 0, 0);
     if (s->ioeventfd_started) {
         virtio_blk_ioeventfd_attach(s);
     }
@@ -1543,6 +1550,7 @@ static int virtio_blk_start_ioeventfd(VirtIODevice *vdev)
     Error *local_err = NULL;
     int r;
 
+    vr_ev_log_ext(VR_EV_ISTART, virtio_get_queue(vdev, 0), 0, 0, 0);
     if (s->ioeventfd_started || s->ioeventfd_starting) {
         return 0;
     }
@@ -1658,6 +1666,7 @@ static void virtio_blk_stop_ioeventfd(VirtIODevice *vdev)
     unsigned i;
     unsigned nvqs = s->conf.num_queues;
 
+    vr_ev_log_ext(VR_EV_ISTOP, virtio_get_queue(vdev, 0), 0, 0, 0);
     if (!s->ioeventfd_started || s->ioeventfd_stopping) {
         return;
     }

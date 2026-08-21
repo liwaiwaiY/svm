@@ -392,12 +392,31 @@ static void fdmon_io_uring_gsource_dispatch(AioContext *ctx,
     process_cq_ring(ctx, ready_list);
 }
 
+/* VR debug: per-wait trace for the iothread event loop */
+static FILE *vr_io_trace;
+static __thread bool vr_io_trace_init_done;
+
+static void vr_io_trace_init(void)
+{
+    if (vr_io_trace_init_done) {
+        return;
+    }
+    vr_io_trace_init_done = true;
+    const char *p = getenv("VR_IO_TRACE");
+    if (p && *p) {
+        vr_io_trace = fopen(p, "a");
+    }
+}
+
 static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
                                int64_t timeout)
 {
     struct __kernel_timespec ts;
     unsigned wait_nr = 1; /* block until at least one cqe is ready */
     int ret;
+    int64_t t0 = 0;
+
+    vr_io_trace_init();
 
     if (timeout == 0) {
         wait_nr = 0; /* non-blocking */
@@ -417,6 +436,43 @@ static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
 
     fill_sq_ring(ctx);
 
+    if (vr_io_trace) {
+        t0 = g_get_monotonic_time();
+        unsigned sq_head = *ctx->fdmon_io_uring.sq.khead;
+        unsigned sq_mask = *ctx->fdmon_io_uring.sq.kring_mask;
+        unsigned n_sq = io_uring_sq_ready(&ctx->fdmon_io_uring);
+        fprintf(vr_io_trace,
+                "W+ t=%" PRId64 " tid=%lx tmout=%" PRId64 "ns wait_nr=%u "
+                "sq=%u cq=%u submit_list=%d op=",
+                t0, (unsigned long)pthread_self(), timeout, wait_nr,
+                n_sq,
+                io_uring_cq_ready(&ctx->fdmon_io_uring),
+                !QSLIST_EMPTY_RCU(&ctx->submit_list));
+        int peek_fd = -1;
+        int peek_ev = 0;
+        for (unsigned i = 0; i < n_sq; i++) {
+            struct io_uring_sqe *sqe =
+                &ctx->fdmon_io_uring.sq.sqes[(sq_head + i) & sq_mask];
+            fprintf(vr_io_trace, "%u(fd=%d,ev=%x),", sqe->opcode, sqe->fd,
+                    (unsigned)sqe->poll_events);
+            if (peek_fd < 0 && sqe->opcode == 6) {
+                peek_fd = sqe->fd;
+                peek_ev = (unsigned)sqe->poll_events;
+            }
+        }
+        /* probe whether the first pending POLL_ADD fd is actually readable
+         * right now (data in the receive buffer would make the poll fire
+         * immediately on submission - a long wait here would then mean the
+         * io_uring poll is NOT seeing buffer state). */
+        if (peek_fd >= 0) {
+            char c;
+            ssize_t pr = recv(peek_fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+            fprintf(vr_io_trace, "peek_fd=%d ev=%x n=%zd errno=%d",
+                    peek_fd, peek_ev, pr, pr < 0 ? errno : 0);
+        }
+        fprintf(vr_io_trace, "\n");
+    }
+
     /*
      * Loop to handle signals in both cases:
      * 1. If no SQEs were submitted, then -EINTR is returned.
@@ -429,6 +485,21 @@ static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
              (ret >= 0 && wait_nr > io_uring_cq_ready(&ctx->fdmon_io_uring)));
 
     assert(ret >= 0);
+
+    if (vr_io_trace) {
+        struct io_uring_cqe *cqe = NULL;
+        int cqe_res = -999;
+        if (io_uring_peek_cqe(&ctx->fdmon_io_uring, &cqe) == 0 && cqe) {
+            cqe_res = cqe->res;
+        }
+        fprintf(vr_io_trace,
+                "W- t=%" PRId64 " tid=%lx ret=%d cq=%u cqe_res=%d "
+                "elapsed=%" PRId64 "us\n",
+                g_get_monotonic_time(), (unsigned long)pthread_self(), ret,
+                io_uring_cq_ready(&ctx->fdmon_io_uring), cqe_res,
+                g_get_monotonic_time() - t0);
+        fflush(vr_io_trace);
+    }
 
     return process_cq_ring(ctx, ready_list);
 }

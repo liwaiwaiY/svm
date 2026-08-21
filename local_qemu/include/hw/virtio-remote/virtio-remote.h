@@ -1,6 +1,65 @@
 #ifndef VIRTIO_REMOTE
 #define VIRTIO_REMOTE
 
+typedef struct VirtQueue VirtQueue;
+
+/*
+ * cmsvm freeze forensics: event ring event types + cross-TU logger. The ring
+ * itself lives in virtio-remote.c (static vr_ev_log); vr_ev_log_ext() is the
+ * exported wrapper used by virtio.c / virtio-blk.c to log host-notifier
+ * attach/detach and block-layer drain, i.e. the suspects for a kick that is
+ * absorbed into the eventfd but never dispatched.
+ */
+#define VR_EV_KICK   1
+#define VR_EV_CLAIM  2
+#define VR_EV_DRAIN  3
+#define VR_EV_POP    4
+#define VR_EV_BREAK  5
+#define VR_EV_WAKE   6
+#define VR_EV_REPLAY 7
+#define VR_EV_RESP   8
+#define VR_EV_ZC     9
+#define VR_EV_ATTACH 10
+#define VR_EV_DETACH 11
+#define VR_EV_DRAINB 12
+#define VR_EV_DRAINE 13
+#define VR_EV_ISTART 14
+#define VR_EV_ISTOP  15
+/* stub-side events (tier6 I=16 collapse forensics; logged in virtio-remote.c) */
+#define VR_EV_SREQ   20  /* stub parsed a request off the socket (a=seq) */
+#define VR_EV_SPOP   21  /* stub device popped a request (a=seq) */
+#define VR_EV_SPUSH  22  /* stub device published a resp into the window (a=seq) */
+#define VR_EV_SSEND  23  /* stub send worker sent resps (a=first seq, b=count) */
+#define VR_EV_SDRAIN 24  /* stub send task ran (a=0) */
+#define VR_EV_SDISP  25  /* stub distributor fired (a=0 data, a=1 zc pollerr) */
+#define VR_EV_SZC    26  /* stub zc completion reaped (a=serial) */
+#define VR_EV_SPUSHW 27  /* stub push blocked on a full resp window */
+#define VR_EV_SSWR   28  /* stub resp send short-wrote (a=seq, b=total sent, c=unsent tail) */
+#define VR_EV_LHDR   29  /* local parsed a resp header (a=vq_nr, b=seq, c=len) */
+#define VR_EV_SHDR   30  /* stub put a resp header on the wire (a=vq_nr, b=seq, c=len) */
+#define VR_EV_SBHD   31  /* stub batch-send head header captured pre-sendmsg
+                            (a=vq_nr, b=seq, c=len) */
+#define VR_EV_LHDRR  32  /* local stage0 header recv (a=hdr_off before, b=n,
+                            c=hdr_off after) */
+#define VR_EV_LDATA  33  /* local stage1 data recv (a=seq, b=cur_off before,
+                            c=n) */
+#define VR_EV_SSND   34  /* stub single-resp sendmsg result
+                            (a=seq, b=bytes queued, c=iov bytes requested) */
+#define VR_EV_SRES   35  /* stub single-resp iov built pre-sendmsg
+                            (a=seq, b=sr->sent, c=total iov bytes requested) */
+#define VR_EV_SRDMP  36  /* stub single-resp wire probe pre-sendmsg
+                            (a=seq, b=first 4B of iov[0], c=next 4B) */
+#define VR_EV_SRSN   37  /* stub zc short-write snapshot result
+                            (a=seq, b=tail_len, c=bytes actually copied) */
+#define VR_EV_SRPT   38  /* stub single-resp sr identity pre-sendmsg
+                            (a=seq, b=low32(sr ptr), c=sr->total) */
+#define VR_EV_SRBT   39  /* stub single-resp branch pre-sendmsg
+                            (a=seq, b=1 if tail-snapshot path, c=msg_iovlen) */
+#define VR_EV_SRTA   40  /* stub single-resp tail-state pre-sendmsg
+                            (a=seq, b=low32(sr->tail), c=sr->tail_base) */
+void vr_ev_log_ext(uint16_t type, VirtQueue *vq,
+                   uint32_t a, uint32_t b, uint32_t c);
+
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/vhost.h"
 #include "qemu/osdep.h"
@@ -40,16 +99,29 @@ typedef struct iovec iovec;
  * pool. These workers are unrelated to the device IOThreads. A process is
  * either the local side or the stub side (never both), and both sides use the
  * same two pools: a send pool (outbound) and a recv pool (inbound), each with
- * VIRTIO_REMOTE_WORKERS threads. Local: send pool drains kicks/retry-sends,
- * recv pool parses responses. Stub: send pool does the resp sendmsg, recv
- * pool parses requests and runs handle_output. A vq is hashed onto exactly
- * one worker per pool (vq_nr % VIRTIO_REMOTE_WORKERS), so one vq is handled
- * by two threads that run concurrently and are serialized on the vq by
- * vq_lock (local) or by vq-internal serialization (stub). Several vqs can
- * share one worker. A worker handles one event at a time; extra events are
- * skipped by the distributor and re-armed by the level-triggered epoll.
+ * vr_workers threads (runtime config, see vr_config_init in virtio-remote.c).
+ * Local: send pool drains kicks/retry-sends, recv pool parses responses.
+ * Stub: send pool does the resp sendmsg, recv pool parses requests and runs
+ * handle_output. A vq is hashed onto exactly one worker per pool
+ * (vq_nr % vr_workers), so one vq is handled by two threads that run
+ * concurrently and are serialized on the vq by vq_lock (local) or by
+ * vq-internal serialization (stub). Several vqs can share one worker. A worker
+ * handles one event at a time; extra events are skipped by the distributor and
+ * re-armed by the level-triggered epoll.
  */
-#define VIRTIO_REMOTE_WORKERS 4
+
+/*
+ * Batch send parameters (runtime, via VR_LOCAL_BATCH_N/M, VR_STUB_BATCH_N/M
+ * env vars - see vr_config_init). The local side merges consecutive copy
+ * requests into one sendmsg() (up to vr_local_batch_n elems or
+ * vr_local_batch_m wire bytes per call); zc-eligible requests still go through
+ * MSG_ZEROCOPY individually. The stub side merges the consecutive copy
+ * responses of one drain into one sendmsg() the same way; zc responses stay
+ * individual. N = 1 disables batching (one sendmsg per request/resp, exactly
+ * the pre-batch behavior). VR_BATCH_MAX is the compile-time cap of the stack
+ * batch arrays; a runtime N above it is clamped.
+ */
+#define VR_BATCH_MAX 64
 
 typedef struct RemoteVQueueCtx {
     int resp_fd;
@@ -97,6 +169,18 @@ typedef struct RemoteVQueueCtx {
      * the send worker are joined by the same lock-free window (ctx->inflight).
      */
     GMutex vq_lock;               /* serializes vq access (pop/push/notify) */
+    /* local: serializes a zc sendmsg + its short-write tail snapshot (send
+     * worker) against the async MSG_ZEROCOPY completion (recv worker), which
+     * frees the slot's header/lens/msg_sg and, for in_num == 0 requests,
+     * pushes + frees the elem. The send worker holds it across sendmsg() so
+     * the completion cannot free the originals between the send and the
+     * resume-entry snapshot. Lock order: zc_lock -> vq_lock. */
+    GMutex zc_lock;
+    /* local: send-worker backpressure on a full inflight window - the send
+     * worker waits on inflight_cond (holding vq_lock) before publishing when
+     * the window is full (M3-sized windows < guest in-flight depth); the recv
+     * worker signals from inflight_clear after advancing head. */
+    GCond inflight_cond;
     void *inflight;               /* the one SPSC in-flight window (Inflight):
                                      local (send worker -> recv worker) holds
                                      VirtQueueElement* + zc bookkeeping; stub
@@ -105,6 +189,12 @@ typedef struct RemoteVQueueCtx {
                                      by check_env() (see the stub window init) */
     void *recv;                   /* local: LocalRecvState; stub: StubRecvState */
     void *zc;                     /* local/stub: MSG_ZEROCOPY state (ZcFdState) */
+    /* local: request tail pending a short-send resume (LocalSendResume*).
+     * A non-blocking sendmsg() that partially queued a request batch leaves
+     * the unsent tails here; the vq's send worker must re-send them (from
+     * their recorded byte offsets) before any further request, else the stub
+     * parses a corrupt stream. Owned by the vq's send worker. */
+    void *send_resume;
 } RemoteVQueueCtx;
 
 /* -------------- Device States ------------- */
@@ -169,7 +259,8 @@ void start_remote_env(void);
 * later by remote_accept_handler (in the stub env), which also marks
 * this TU as the stub side via chenv(VIRTIO_REMOTE_ENV).
 */
-void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num);
+void remote_vq_ctx_init(RemoteVQueueCtx *ctx, unsigned int vring_num,
+                        bool local_side);
 
 /*
 * called at vq teardown (virtio_delete_queue / virtio_device_free_virtqueues /

@@ -4003,6 +4003,8 @@ static void virtio_queue_host_notifier_aio_poll_end(EventNotifier *n)
 
 void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
 {
+    vr_ev_log_ext(VR_EV_ATTACH, vq, is_mosaic(vq->vdev) ? 1 : 0, 0,
+                  (uint32_t)event_notifier_get_fd(&vq->host_notifier));
     /*
      * virtio_queue_aio_detach_host_notifier() can leave notifications disabled.
      * Re-enable them.  (And if detach has not been used before, notifications
@@ -4057,6 +4059,7 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
  */
 void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ctx)
 {
+    vr_ev_log_ext(VR_EV_ATTACH, vq, is_mosaic(vq->vdev) ? 2 : 0, 0, 0);
     /* See virtio_queue_aio_attach_host_notifier() */
     if (!virtio_queue_get_notification(vq)) {
         virtio_queue_set_notification(vq, 1);
@@ -4083,6 +4086,8 @@ void virtio_queue_aio_attach_host_notifier_no_poll(VirtQueue *vq, AioContext *ct
 
 void virtio_queue_aio_detach_host_notifier(VirtQueue *vq, AioContext *ctx)
 {
+    vr_ev_log_ext(VR_EV_DETACH, vq, 0, 0,
+                  (uint32_t)event_notifier_get_fd(&vq->host_notifier));
     aio_set_event_notifier(ctx, &vq->host_notifier, NULL, NULL, NULL);
 
     /*
@@ -4435,7 +4440,7 @@ static void local_set_remote(Object *obj, const char *ip_port, Error **errp)
 
         if (!vq->remote_ctx) {
             vq->remote_ctx = g_new0(RemoteVQueueCtx, 1);
-            remote_vq_ctx_init(vq->remote_ctx, vq->vring.num);
+            remote_vq_ctx_init(vq->remote_ctx, vq->vring.num, true);
         }
         RemoteVQueueCtx *ctx = vq->remote_ctx;
 
