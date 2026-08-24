@@ -994,6 +994,17 @@ virtio_crypto_handle_dataq_bh(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOCryptoQueue *q =
          &vcrypto->vqs[virtio_crypto_vq2q(virtio_get_queue_index(vq))];
 
+    /* cmsvm remote stub: the device is driven by the stub's handle worker
+     * (one worker per vq), so the requests must be processed inline here.
+     * The main-loop BH deferral would pop the req queue from a different
+     * thread than the handle worker that filled it (SPSC violation), and
+     * vdev->vm_running is always 0 on the stub (its VM never starts), so
+     * the check below would drop every dataq request. */
+    if (virtqueue_get_remote_ctx(vq)) {
+        virtio_crypto_handle_dataq(vdev, vq);
+        return;
+    }
+
     /* This happens when device was stopped but VCPU wasn't. */
     if (!vdev->vm_running) {
         return;

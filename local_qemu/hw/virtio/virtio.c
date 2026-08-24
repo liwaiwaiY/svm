@@ -2808,7 +2808,13 @@ static void virtio_irq(VirtQueue *vq)
      * have already called ->set_guest_notifiers() sometime before calling this
      * function.
      */
-    if (qemu_in_iothread()) { // virtio-remote lies in iothread
+    if (qemu_in_iothread() &&
+        event_notifier_get_fd(&vq->guest_notifier) > 0) {
+        /* irqfd path: only valid if the guest notifier was actually set up
+         * (->set_guest_notifiers). virtio-remote's local side pushes used
+         * elems from its recv worker thread (an IOThread) but never sets up
+         * the guest notifier, so fall back to virtio_notify_vector(), which
+         * delivers via msix_notify()/pci_set_irq() and is thread-safe. */
         defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
     } else {
         virtio_notify_vector(vq->vdev, vq->vector);
@@ -2822,8 +2828,10 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
         return;
     }
 
+    bool vri_notify_ok;
     WITH_RCU_READ_LOCK_GUARD() {
-        if (!virtio_should_notify(vdev, vq)) {
+        vri_notify_ok = virtio_should_notify(vdev, vq);
+        if (!vri_notify_ok) {
             return;
         }
     }

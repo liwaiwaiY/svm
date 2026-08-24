@@ -484,6 +484,8 @@ static unsigned vr_local_batch_n;
 static unsigned vr_local_batch_m;
 static unsigned vr_stub_batch_n;
 static unsigned vr_stub_batch_m;
+static unsigned vr_stub_queue_max; /* recv-batch cap: max reqs queued between
+                                    * recv and handle before parsing pauses */
 static bool vr_buf_pool_on;
 
 static void buf_pool_init(void);
@@ -518,6 +520,7 @@ static void vr_config_init(void)
     vr_local_batch_m = 64 * 1024;
     vr_stub_batch_n  = 4;
     vr_stub_batch_m  = 64 * 1024;
+    vr_stub_queue_max = 0; /* 0 = unlimited (current behavior) */
     vr_buf_pool_on   = false;
 
     fp = fopen(VR_CONFIG_PATH, "r");
@@ -565,6 +568,8 @@ static void vr_config_init(void)
             vr_stub_batch_n = strtoul(val, NULL, 0);
         } else if (strcmp(key, "stub_batch_m") == 0) {
             vr_stub_batch_m = strtoul(val, NULL, 0);
+        } else if (strcmp(key, "stub_queue_max") == 0) {
+            vr_stub_queue_max = strtoul(val, NULL, 0);
         } else if (strcmp(key, "buf_pool") == 0) {
             vr_buf_pool_on = (*val == '1' ||
                               g_ascii_strncasecmp(val, "on", 2) == 0 ||
@@ -2900,6 +2905,8 @@ void remote_accept_handler(void *opaque)
      *    header, so the buffers are sized by vq_nt, not VIRTIO_QUEUE_MAX */
     char hdr[8];
     if (read_all(ctl_fd, hdr, sizeof(hdr)) < 0) {
+        error_report("remote stub: read_all ctl header failed (errno=%d %s)",
+                     errno, strerror(errno));
         goto fail;
     }
     uint32_t magic;
@@ -2916,6 +2923,8 @@ void remote_accept_handler(void *opaque)
     vq_nt = cnt;
     msg = g_new(char, 8 + vq_nt * 2);
     if (read_all(ctl_fd, msg, vq_nt * 2) < 0) {
+        error_report("remote stub: read_all ctl src_ports failed (errno=%d %s)",
+                     errno, strerror(errno));
         goto fail;
     }
     /* the source ports are kept for identity check if needed later */
@@ -2959,6 +2968,8 @@ void remote_accept_handler(void *opaque)
         memcpy(msg + 8 + i * 2, &p, 2);
     }
     if (write_all(ctl_fd, msg, 8 + vq_nt * 2) < 0) {
+        error_report("remote stub: write_all ctl reply failed (errno=%d %s)",
+                     errno, strerror(errno));
         goto fail;
     }
 
@@ -3932,6 +3943,17 @@ static void stub_handle_task(void *opaque)
         goto out;
     }
     for (;;) {
+        if (vr_stub_queue_max > 0 &&
+            qatomic_load_acquire(&ctx->req_count) >= vr_stub_queue_max &&
+            qatomic_load_acquire(&ctx->in_handle)) {
+            /* recv-batch cap reached while the device is mid-batch: stop
+             * parsing; the push that ends the batch drains the queue and
+             * re-dispatches this task. When the device is idle the queue is
+             * driven below regardless (a full idle queue would otherwise
+             * strand until the next POLLIN - which never comes once the
+             * local window is exhausted). */
+            break;
+        }
         /* drain the queue before parsing: a re-dispatch (from the device's
          * push) can arrive with requests already queued but nothing left on
          * the socket, and those reqs must still be handed to the device.
@@ -4028,9 +4050,15 @@ void stub_distributor(void *opaque)
      * The dispatch is overwriting (no busy-claim): if the worker is busy the
      * event is queued and the partial parse resumes when it runs, and the
      * level-triggered epoll keeps re-firing while data remains, so no readable
-     * event is ever lost. */
+     * event is ever lost. When the recv-batch cap is reached while the device
+     * is mid-batch, skip the dispatch: the push that ends the batch re-arms
+     * it, so this keeps the re-firing epoll from spinning a parse that would
+     * only hit the cap again. */
     vr_ev_log(VR_EV_SDISP, vq, 0, 0, 0);
-    if (!qatomic_load_acquire(&ctx->dead)) {
+    if (!qatomic_load_acquire(&ctx->dead) &&
+        !(vr_stub_queue_max > 0 &&
+          qatomic_load_acquire(&ctx->req_count) >= vr_stub_queue_max &&
+          qatomic_load_acquire(&ctx->in_handle))) {
         worker_pool_dispatch(&recv_pool, vq, stub_handle_task, NULL);
     }
     return;
