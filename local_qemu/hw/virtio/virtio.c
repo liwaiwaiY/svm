@@ -1701,6 +1701,9 @@ static bool virtqueue_map_desc(VirtIODevice *vdev, unsigned int *p_num_sg,
         hwaddr len = sz;
 
         if (num_sg == max_num_sg) {
+            fprintf(stderr, "VMAP_F: is_write=%d num_sg=%u max_num_sg=%u "
+                    "pa=0x%" PRIx64 " sz=%zu\n",
+                    is_write, num_sg, max_num_sg, (uint64_t)pa, sz);
             virtio_error(vdev, "virtio: too many write descriptors in "
                                "indirect table");
             goto out;
@@ -1906,6 +1909,23 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
                                         desc.addr, desc.len);
         }
         if (!map_ok) {
+            fprintf(stderr,
+                    "POP_F: vq_idx=%u out_num=%u in_num=%u elem_entries=%u "
+                    "indirect=%d max=%u ring_num=%u\n",
+                    virtio_get_queue_index(vq), out_num, in_num, elem_entries,
+                    (desc_cache == &indirect_desc_cache) ? 1 : 0,
+                    max, vq->vring.num);
+            if (desc_cache == &indirect_desc_cache) {
+                int k;
+                for (k = 0; k < (int)max; k++) {
+                    VRingDesc d;
+                    vring_split_desc_read(vdev, &d, desc_cache, k);
+                    fprintf(stderr,
+                            "  DESC[%d] flags=0x%x len=%u addr=0x%" PRIx64 "\n",
+                            k, d.flags, d.len, (uint64_t)d.addr);
+                }
+                fprintf(stderr, "  TOTAL_INDIRECT=%u\n", max);
+            }
             goto err_undo_map;
         }
 

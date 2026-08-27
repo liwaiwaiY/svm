@@ -486,6 +486,9 @@ static unsigned vr_stub_batch_n;
 static unsigned vr_stub_batch_m;
 static unsigned vr_stub_queue_max; /* recv-batch cap: max reqs queued between
                                     * recv and handle before parsing pauses */
+static unsigned vr_stub_merge_m;   /* M5: merge one req's in_sg entries into a
+                                    * single buffer when total in-bytes <= this;
+                                    * 0 = keep per-sg buffers (original) */
 static bool vr_buf_pool_on;
 
 static void buf_pool_init(void);
@@ -521,6 +524,7 @@ static void vr_config_init(void)
     vr_stub_batch_n  = 4;
     vr_stub_batch_m  = 64 * 1024;
     vr_stub_queue_max = 0; /* 0 = unlimited (current behavior) */
+    vr_stub_merge_m   = 0; /* 0 = per-sg in buffers (original behavior) */
     vr_buf_pool_on   = false;
 
     fp = fopen(VR_CONFIG_PATH, "r");
@@ -570,6 +574,8 @@ static void vr_config_init(void)
             vr_stub_batch_m = strtoul(val, NULL, 0);
         } else if (strcmp(key, "stub_queue_max") == 0) {
             vr_stub_queue_max = strtoul(val, NULL, 0);
+        } else if (strcmp(key, "stub_merge_m") == 0) {
+            vr_stub_merge_m = strtoul(val, NULL, 0);
         } else if (strcmp(key, "buf_pool") == 0) {
             vr_buf_pool_on = (*val == '1' ||
                               g_ascii_strncasecmp(val, "on", 2) == 0 ||
@@ -3171,6 +3177,7 @@ static unsigned int stub_resp_iov_tail(const StubResp *sr, unsigned int from,
                                        struct iovec *out, unsigned int cap)
 {
     unsigned int n = 0, off = 0;
+    bool started = false;
 
     for (unsigned int i = 0; i < sr->iov_cnt && n < cap; i++) {
         unsigned int len = sr->iov[i].iov_len;
@@ -3178,8 +3185,16 @@ static unsigned int stub_resp_iov_tail(const StubResp *sr, unsigned int from,
             off += len;
             continue;
         }
-        out[n].iov_base = (char *)sr->iov[i].iov_base + (from - off);
-        out[n].iov_len = len - (from - off);
+        if (!started) {
+            /* the iov that contains the resume byte: partial from there */
+            out[n].iov_base = (char *)sr->iov[i].iov_base + (from - off);
+            out[n].iov_len = len - (from - off);
+            started = true;
+        } else {
+            /* everything after the resume point goes out whole */
+            out[n].iov_base = sr->iov[i].iov_base;
+            out[n].iov_len = len;
+        }
         n++;
         off += len;
     }
@@ -3290,8 +3305,23 @@ static bool stub_send_batch(int fd, StubResp **batch, unsigned int n,
     }
     if (ret < 0) {
         /* hard error: keep the slots; the connection teardown releases them */
-        error_report("remote stub: sendmsg resp batch failed: %s",
-                     strerror(errno));
+        static unsigned int efa_probe;
+        if (efa_probe++ < 3) {
+            error_report("remote stub: sendmsg resp batch failed: %s "
+                         "(n=%u k=%u total=%u seq0=%u)",
+                         strerror(errno), n, k, total, seq0);
+            for (unsigned int j = 0; j < n && j < 8; j++) {
+                error_report("  batch[%u]: seq=%u sent=%u iov_cnt=%u total=%u "
+                             "header=%p iov=%p", j, seq0 + j, batch[j]->sent,
+                             batch[j]->iov_cnt, batch[j]->total, batch[j]->header,
+                             batch[j]->iov);
+                for (unsigned int v = 0; v < batch[j]->iov_cnt; v++) {
+                    error_report("    iov[%u]: base=%p len=%llu",
+                                 v, batch[j]->iov[v].iov_base,
+                                 (unsigned long long)batch[j]->iov[v].iov_len);
+                }
+            }
+        }
         return false;
     }
 
@@ -3782,6 +3812,7 @@ static StubReq *stub_recv_req(RemoteVQueueCtx *ctx, int fd)
 
         if (rs->stage == 1) {
             size_t lens_bytes = (rs->out_num + rs->in_num) * sizeof(int);
+            unsigned int in_total = 0;
             ssize_t n = recv(fd, (char *)rs->lens + rs->lens_off,
                              lens_bytes - rs->lens_off, 0);
             if (n < 0) {
@@ -3809,20 +3840,42 @@ static StubReq *stub_recv_req(RemoteVQueueCtx *ctx, int fd)
                 rs->out_sg[i].iov_base = g_new(char, rs->out_sg[i].iov_len);
                 rs->out_total += rs->out_sg[i].iov_len;
             }
+            /* M5: stub_merge_m > 0 merges all in_sg entries of one request
+             * (one virtio elem) into a single contiguous buffer: the device
+             * then runs one large aio instead of in_num page-sized aios and
+             * the response is one iov. The wire resp is unchanged (it carries
+             * only data_len), and the merged buffer is page-aligned so the
+             * zc resp path still applies. */
             for (unsigned int i = 0; i < rs->in_num; i++) {
-                rs->in_sg[i].iov_len = rs->lens[rs->out_num + i];
-                /* page-aligned (and page-multiple sized) so the response
-                 * send can use MSG_ZEROCOPY and let the NIC DMA straight
-                 * from these buffers; recycled from the M5 pool when on */
-                if (rs->in_sg[i].iov_len == 0) {
-                    rs->in_sg[i].iov_base = NULL;
-                } else {
-                    rs->in_sg[i].iov_base = buf_pool_alloc(rs->in_sg[i].iov_len);
-                    if (!rs->in_sg[i].iov_base) {
-                        error_report("remote stub: buf_pool_alloc failed: %s",
-                                     strerror(errno));
-                        stub_recv_state_reset(rs);
-                        return NULL;
+                in_total += rs->lens[rs->out_num + i];
+            }
+            if (vr_stub_merge_m > 0 && rs->in_num > 1 &&
+                in_total > 0 && in_total <= vr_stub_merge_m) {
+                rs->in_sg[0].iov_len = in_total;
+                rs->in_sg[0].iov_base = buf_pool_alloc(in_total);
+                if (!rs->in_sg[0].iov_base) {
+                    error_report("remote stub: buf_pool_alloc(%u) failed: %s",
+                                 in_total, strerror(errno));
+                    stub_recv_state_reset(rs);
+                    return NULL;
+                }
+                rs->in_num = 1;
+            } else {
+                for (unsigned int i = 0; i < rs->in_num; i++) {
+                    rs->in_sg[i].iov_len = rs->lens[rs->out_num + i];
+                    /* page-aligned (and page-multiple sized) so the response
+                     * send can use MSG_ZEROCOPY and let the NIC DMA straight
+                     * from these buffers; recycled from the M5 pool when on */
+                    if (rs->in_sg[i].iov_len == 0) {
+                        rs->in_sg[i].iov_base = NULL;
+                    } else {
+                        rs->in_sg[i].iov_base = buf_pool_alloc(rs->in_sg[i].iov_len);
+                        if (!rs->in_sg[i].iov_base) {
+                            error_report("remote stub: buf_pool_alloc failed: %s",
+                                         strerror(errno));
+                            stub_recv_state_reset(rs);
+                            return NULL;
+                        }
                     }
                 }
             }

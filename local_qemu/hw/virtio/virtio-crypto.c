@@ -946,6 +946,9 @@ static void virtio_crypto_handle_dataq(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOCryptoReq *req;
 
     while ((req = virtio_crypto_get_request(vcrypto, vq))) {
+        fprintf(stderr, "CRYPTO_DATAQ: vq_idx=%u out_num=%u in_num=%u\n",
+                virtio_get_queue_index(vq), req->elem.out_num,
+                req->elem.in_num);
         if (virtio_crypto_handle_request(req) < 0) {
             virtqueue_detach_element(req->vq, &req->elem, 0);
             virtio_crypto_free_request(req);
