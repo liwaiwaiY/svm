@@ -1,0 +1,319 @@
+%%
+%% This is file sample-acmcp.tex',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% samples.dtx  (with options: all,journal,acmcp')
+%% 
+%% IMPORTANT NOTICE:
+%% 
+%% For the copyright see the source file.
+%% 
+%% Any modified versions of this file must be renamed
+%% with new filenames distinct from sample-acmcp.tex.
+%% 
+%% For distribution of the original source see the terms
+%% for copying and modification in the file samples.dtx.
+%% 
+%% This generated file may be distributed as long as the
+%% original source files, as listed above, are part of the
+%% same distribution. (The sources need not necessarily be
+%% in the same archive or directory.)
+%%
+%%
+%% Commands for TeXCount
+%TC:macro~\cite [option:text,text]
+%TC:macro~\citep [option:text,text]
+%TC:macro~\citet [option:text,text]
+%TC:envir table 0 1
+%TC:envir table* 0 1
+%TC:envir tabular [ignore] word
+%TC:envir displaymath 0 word
+%TC:envir math 0 word
+%TC:envir comment 0 0
+%%
+%% The first command in your LaTeX source must be the \documentclass
+%% command.
+%%
+%% For submission and review of your manuscript please change the
+%% command to \documentclass[manuscript, screen, review]{acmart}.
+%%
+%% When submitting camera ready or to TAPS, please change the command
+%% to \documentclass[sigconf]{acmart} or whichever template is required
+%% for your publication.
+%%
+%%
+\documentclass[sigplan,10pt]{acmart}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+%% Rights management information.  This information is sent to you
+%% when you complete the rights form.  These commands have SAMPLE
+%% values in them; it is your responsibility as an author to replace
+%% the commands and values with those provided to you when you
+%% complete the rights form.
+\setcopyright{acmlicensed}
+\copyrightyear{2027}
+\acmYear{2027}
+\acmDOI{XXXXXXX.XXXXXXX}
+\acmConference[EuroSys'27]{European Conference on Computer Systems}{April 19-23, 2027}{Rabat, Morocco}
+
+%%
+%% These commands are for a JOURNAL article.
+%% \acmJournal{JDS}
+%% \acmVolume{37}
+%% \acmNumber{4}
+%% \acmArticle{111}
+%% \acmMonth{8}
+
+%%
+%% Submission ID.
+%% Use this when submitting an article to a sponsored event. You'll
+%% receive a unique submission ID from the organizers
+%% of the event, and this ID should be used as the parameter to this command.
+%%\acmSubmissionID{123-A56-BU3}
+% \usepackage{showframe}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+\usepackage{stfloats}
+\usepackage[normalem]{ulem}
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\renewcommand{\qedsymbol}{$\blacksquare$}
+\renewcommand{\algorithmicrequire}{ \textbf{Input:}}
+\renewcommand{\algorithmicensure}{ \textbf{Output:}}
+\renewcommand\thesubfigure{(\alph{subfigure})}
+\captionsetup[sub]{labelformat=simple}
+
+\bibliographystyle{plain}
+%%
+%% end of the preamble, start of the body of the document source.
+\begin{document}
+
+%%
+%% The "title" command has an optional parameter,
+%% allowing the author to define a "short title" to be used in page headers.
+\title{Mosaic: Transparent Stitching of Stranded Resources across Multiple Hosts in Virtualization}
+
+\author{Yanyan Li$^\dagger$, Zhiqian Xu$^\dagger$, Yawen Wang$^\dagger$, Hai Jiang$^{\dagger*}$, Keqin Li$^\diamondsuit$}
+\affiliation{
+    \institution{$^\dagger$Beijing University of Posts and Telecommunications \\
+                 $^\diamondsuit$State University of New York}
+}
+
+%%
+%% By default, the full list of authors will be used in the page
+%% headers. Often, this list is too long, and will overlap
+%% other information printed in the page headers. This command allows
+%% the author to define a more concise list
+%% of authors' names for this purpose.
+%% \renewcommand{\shortauthors}{Trovato et al.}
+%%
+%% Article type: Research, Review, Discussion, Invited or position
+\acmArticleType{Review}
+%%
+%% Links to code and data
+%% \acmCodeLink{https://github.com/borisveytsman/acmart}
+%% \acmDataLink{htps://zenodo.org/link}
+%%
+%% Authors' contribution
+%% \acmContributions{BT and GKMT designed the study; LT, VB, and AP
+%%  conducted the experiments, BR, HC, CP and JS analyzed the results,
+%%  JPK developed analytical predictions, all authors participated in
+%%  writing the manuscript.}
+%%
+%% Sometimes the addresses are too long to fit on the page.  In this
+%% case uncomment the lines below and fill them accodingly.
+%%
+%% \authorsaddresses{Corresponding author: Ben Trovato,
+%% \href{mailto:trovato@corporation.com}{trovato@corporation.com};
+%% Institute for Clarity in Documentation, P.O. Box 1212, Dublin,
+%% Ohio, USA, 43017-6221}
+%%
+%%
+%% Keywords. The author(s) should pick words that accurately describe
+%% the work being presented. Separate the keywords with commas.
+\keywords{Cross-host, Resource Stitching, Virtualization}
+
+\settopmatter{printfolios=true}
+
+\begin{abstract}
+In datacenters, the growing diversity of workloads always cause some resources to turn into unallocatable stranded ones. Proactive schedulers and resource disaggregation have been designed to prevent or eliminate such resource stranding. However, unpredictable agentic workloads and high costs of disaggregation impede their deployment in productions. This paper proposes Mosaic, which is able to transparently stitch stranded resources across multiple hosts into an allocatable resource set. Mosaic is designed with a scheduling wrapper and a runtime system. The scheduling wrapper introduces a decomposition module to relax the indivisibility constraint of existing cluster schedulers. The runtime system intercepts and forwards I/O requests at para-virtualization emulator, requiring no modifications to either host or guest operating systems. For evaluations, a prototype has been developed. Results demonstrate that the slowdown of Mosaic is around $22\%$ on macro-benchmarks, while the acceptance rate is improved to $1.57\times$ in highly stranding conditions.
+\end{abstract}
+\maketitle
+
+\section{Introduction}\label{intro}
+Datacenters have become the foundational infrastructure of digital society, supporting plenty of business~\cite{business1, business2} and computing demands~\cite{ai, cloud, hpc}. Boosting resource utilization of datacenters is a longstanding challenge across research and industry~\cite{mlaas, coach, legoos, feditor, protean}. Unused resources can be classified as unallocated, underutilized, and stranded~\cite{coach} ones. Unallocated resources are intentionally reserved to ensure service-level agreements~\cite{lazy, derm} and for cluster management~\cite{dynamo, mgr}. Underutilized resources are allocated to Virtual Machines (VMs) but not used~\cite{harvestvm, memory}. Stranded resources cannot be allocated since other resources in the same Physical Machine (PM) are fully allocated~\cite{coach, legoos, faasmem}. Solutions for unallocated and underutilized resources are deeply researched and stably deployed~\cite{lazy, derm, harvestvm}. However, resource stranding is still a common issue in datacenters, which has been more server due to the growing diversity of workloads~\cite{agentcgroup, pond}.
+
+Proactive schedulers~\cite{coach, resourcecentral, protean} and resource dis\-aggrega\-tion~\cite{legoos, pond, fractos} are two effective methods to alleviate resource stranding at the level of cluster scheduling and host operating system, respectively. However, proactive schedulers require resource usage patterns of workloads, while resource disaggregation demands massive hardware and software modifications. Both are difficult to be deployed. Mosaic, proposed in this paper, turns stranded resources into available ones by stitching them into an allocatable resource set in virtualization, as shown in Fig.~\ref{consolidation}. It is a reactive solution for stranded resources with transparency to both host and guest operating systems.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{src/pic/consolidation.pdf}
+    \caption{Resource stitching.}
+    \label{consolidation}
+\end{figure}
+
+Mosaic exposes stitched resources via the para-virtualization framework, which originally separates host and guest and connects them via multiple virtqueues. Such feature allows Mosaic to intercept the data path in the emulator and forwards device accesses to another PM. For clarity, the PM which provides CPU cores is called local side, while PMs providing peripherals are labeled as remote sides. The expanded emulator mainly includes two forwarding modules, as shown in Fig.~\ref{overall}. The local forwarding module sends guest requests and handles remote responses. The remote forwarding module invokes devices and route access results. To reduce crossing overhead for each request, Mosaic introduces zero copy transmission and buffer pooling. An adaptive threshold is designed to avoid applying zero copy optimization to small requests. The buffer pooling is consisted of multiple buckets. Additionally, message batching, pipelining, and worker pooling are applied to increase potential Input/Output (I/O) concurrency. For small requests under zero-copy threshold, Mosaic batches them. Also, both forwarding modules separate sending and receiving handlers to increase parallelism. Worker pooling with hash-based mapping is used to enable concurrency among multiple virtqueues.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{src/pic/overall.pdf}
+    \caption{The Overall Architecture of Mosaic.}
+    \label{overall}
+\end{figure}
+
+results...
+
+This paper makes the following contributions:
+\begin{enumerate}
+    \item Mosaic, a virtualization-layer resource stitching abstraction that allows cross-host resource usage, is proposed to turn stranded resources into allocatable ones.
+    \item A cross-host forwarding architecture, based on para-virtualization framework, is designed, supporting pipe\-lined request processing.
+    \item A low-overhead prototype of Mosaic is implemented and evaluated\footnote{anonymous code link}.
+\end{enumerate}
+
+This paper is structured as follows. Section~\ref{analysis} architecturally analyzes stranding resources. Section~\ref{runtimesystem} details Mosaic designing. Section~\ref{eval} shows evaluation results. Section~\ref{relatedwork} and Section~\ref{conclu} are related work, discussion, and conclusion.
+
+\section{Analysis}\label{analysis}
+\subsection{Stranded Resources in Different Managers}
+Resource management in datacenters is completed via the coordination among the cluster scheduler, the host OS, and the emulator, as shown in Fig.~\ref{mapping}. The cluster scheduler assigns work nodes to VMs based on its scheduling objective, which is related to the states of Physical Machines (PMs) and VMs' resource demands. Each host OS manages fine-grained allocations on its PM. The emulator emulates virtual resources for the guest OS, with various dataplane acceleration mechanisms. Since emulators can only emulate allocated hardware, researchers have tried to solve the resource stranding issue in the cluster scheduler (i.e., proactive schedulers~\cite{autopilot, audible, proactive}) or the host OS (i.e., resource disaggregation~\cite{fractos, legoos, clio, pond}).
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{src/pic/mapping.pdf}
+    \caption{Resource Management in datacenters.}
+    \label{mapping}
+\end{figure}
+
+The cluster scheduler traces resources states of all PMs and schedules VM requests. Resource utilization of VMs and PMs can be modeled as time-series curves. A PM is filtered of a VM scheduling if their utilization curves exceeds the allocation threshold after superposition. When a PM is unable to satisfy any pending VM requests, its remaining unallocated hardware will not be used and become stranded resources. To mitigate this, proactive schedulers group VMs with complementary resource demands into a single scheduling unit, smoothing out dynamic utilization fluctuations. By aligning the resource ratio of a unit with PM provisioning, resources are fully allocated simultaneously. However, as stated above, emerging unpredictable workloads lack stable statistical patterns, making curve abstraction impossible and rendering these proactive schedulers ineffective.
+
+The host OS manages multiple types of hardware via different subsystems (i.e., OS functionalities). Hardware availability can be viewed through the lens of OS subsystems. When a resource is fully allocated, its corresponding subsystem rejects to serve further requests. A PM is filtered if there exists a required subsystem rejecting the VM's requests. When a PM is unable to satisfy any pending VM requests, resources whose subsystems support more requests become stranded. Resource disaggregation disseminates resources and their OS subsystems to distributed PMs via decoupling hardware. Though available resources are spread across multiple machines, their subsystems could be grouped to serve a VM. As usages of different resources are independent, resource stranding is essentially eliminated. As for existing blade servers, resource disaggregation connects stranded resources by adding glue logic in the OS kernel. However, as stated above, practical deployment of this architecture is difficult by the need for intrusive OS kernel modifications and hardware-specific blade specifications.
+
+\subsection{Design Principles}
+Stitching a resource across hosts introduces two requirements beyond conventional VM I/O. First, the remote resource must remain transparent to the guest. Second, the additional cost of crossing the host boundary must be carefully controlled. We therefore follow three principles in designing Mosaic Runtime.
+
+\textbf{P1: Transparency. }Mosaic should preserve the existing VM device abstraction. The guest continues to access a stitched resource through an unmodified interface, without knowing whether the underlying resource is local or remote. Also, the host is not aware of guest requests are forwarded to remote machines.
+
+\textbf{P2: Low Crossing Overhead.} A remote I/O request incurs additional network, data-movement, synchronization, and buffer-management costs. Mosaic therefore pipelines request processing and amortizes per-request overhead through batching, while avoiding unnecessary data movement and buffer allocation.
+
+\textbf{P3: Latency Tolerance.} Unlike local VirtIO, remote requests must tolerate network latency. Mosaic maintains sufficient outstanding requests and processes them concurrently so that network communication, remote device processing, and local request handling can overlap.
+
+\section{Design and Implementation}\label{runtimesystem}
+Based on the three principles, we choose the para-virtualization to be basic emulator for transparency. To reduce crossing overhead, Mosaic applies multiple transmission optimizations. For latency tolerance, worker pooling is introduced to enhance concurrency.
+
+\subsection{The Reason of Para-Virtualization}
+The para-virtualization, i.e., Virtio, is the only emulation type in virtualization layer to enable transparency to both host and guest. Fig.~\ref{devicemodel} illustrates three emulating of peripherals, including full virtualization, pass through, and para-virtualization. Full Virtualization (FV) emulates a complete device in software. Pass-Through (PT) directly exposes physical devices to virtual machines. Para-Virtualization (PV) introduces a cooperative interface between the guest and the emulator. Virtio offers a frontend-backend split abstraction. The VM applications access devices by guest drivers, while the backend drivers in the emulator invokes host drivers to handle I/O requests. This separation enables transparency via intercepting requests at the emulator.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\linewidth]{src/pic/devicemodel.pdf}
+    \caption{Device models in the QEMU emulator.}
+    \label{devicemodel}
+\end{figure}
+
+\subsection{System Overview}
+Mosaic exploits the separation between VirtIO front-end and back-end drivers to stitch resources across hosts at the virtualization layer. The front-end driver and the back-end driver of a stitched device execute on different machines and are connected through Mosaic's forwarding runtime. We refer to the machine hosting the guest CPU and QEMU as the local side, and the machine hosting the physical resource and its back-end driver as the remote side. From the guest's perspective, the remote resource remains an ordinary VirtIO device. Mosaic hides its physical location below the guest-visible device abstraction.
+
+Figure~X shows the architecture of Mosaic. The expanded emulator consists of a local forwarding module and a remote forwarding module. The local module receives requests from VirtIO queues and forwards them to the remote side, while the remote module receives the requests and submits them to the physical device. Device responses follow the reverse path. Since VirtIO devices commonly expose multiple virtqueues to support parallel I/O, Mosaic assigns an independent connection to each virtqueue, avoiding contention between otherwise independent request streams.
+
+The design follows the three principles described in Section~\ref{analysis}. The existing VirtIO interface provides guest transparency, while the forwarding pipeline reduces the overhead of crossing the host boundary. Mosaic further maintains sufficient request concurrency to tolerate network latency. The mechanisms realizing these principles are described along the request path in the following sections.
+
+% Using the separation of para-virtualization, Mosaic places front-end driver and back-end driver in different machines, and connects them with two forwarding modules. For clarity, the machine providing CPU cores to run guest is called as local side. All front-end drivers are executed on local side, while back-end drivers of stranded hardware runs on remote sides. Via this connection, stranded resources are stitched as an allocatable resource set. Additionally, Mosaic implements multiple mechanisms to satisfy design principle \textbf{2} and \textbf{3}.
+
+% Many virtio devices uses multiple virtqueues to enable parallel device accessing. Therefore, Mosaic assigns each virtqueue with a socket to avoid contention among multiple virtqueues. Additionally, worker pooling mechanism is introduced to separate transactions of different virtqueues. Each arrived notifier is dispatched to a worker for sending requests or receiving responses.
+
+% Request forwarding, including sending and receiving, is decoupled and asynchronized. Device requests flows between senders and receivers via lock-free buffers. The local forwarding module uses a Single Producer Single Consumer (SPSC) buffer to record requests that will generate responses. The remote forwarding module introduces a lock-free queue to record request that are arrived but not submit to devices.
+
+% Requests could carry data with different sizes. To reduce redundant data copy when transmitting, Mosaic applies zero copy optimization for requests, whose data is larger than a threshold. This threshold is defined to avoid zero copy overhead outweighting the network performance. For requests, whose data is smaller than the threshold, Mosaic batches them to average the network latency. Via the two optimizations, all request transmission are accelerated.
+
+% The remote forwarding module maintains a buffer pool to avoid overhead introduced by heap memory management. Since device submission is mutex, the receiver in remote forwarding batches requests, which arrives before finishing last batch, to continue network transmission, leaving backpressure away from local side.
+
+\subsection{End-to-End Workflow}
+The interaction workflow between local QEMU and remote stubs as illustrated in Fig.~\ref{workflow}. This architecture expands the native Virtio ring buffer, confined to single-machine shared memory, into a cross-machine workflow.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{src/pic/workflow.pdf}
+    \caption{The detailed workflow of Mosaic runtime.}
+    \label{workflow}
+\end{figure}
+
+The virtio frontend driver in guest sends I/O requests by writing the shared \texttt{vring} buffer of each \texttt{Virtqueue} abstraction. Then, the guest driver invokes a \texttt{kick} function to send a MMIO write or PIO write transaction, which triggers a \texttt{VM\_exit}. The KVM subsystem of Linux checks the \texttt{exist\_reason} and sends a notification to the emulator process \textcircled{1}. Since each \texttt{virtqueue} is shared among the guest and emulator, backend drivers read I/O requests and write responses via a unified \texttt{VirtQueueElement} data structure. Therefore, upon sensing the notification, the overridden handler of Mosaic fetches the I/O request as a \texttt{VirtQueueElement} via a framework interface \textcircled{2}. After analyzing the memory layout and other critical metadata, the local QEMU forwards the I/O requests by invoking a router module \textcircled{3}. The router is optimized with zero-copy and asynchronous pipelining to reduce the communication overhead.
+
+When receiving an I/O request, the remote stub analyze the metadata in the payload. The memory layout of the \texttt{VirtQueue\-Element} is reconstructed to avoid a single large buffer. The remote stub constructs a pseudo-local request and injects it into backend drivers \textcircled{4}. Unaware of the network translation, the backend driver processes element and issues standard system calls to the remote host OS to operate physical hardware \textcircled{5}. Once the physical I/O completes \textcircled{6}, the backend driver writes the resulting data back into the element and triggers a completion callback \textcircled{7}. Receiving this completion signal, the remote stub transmits the updated payload back to local QEMU \textcircled{8}.
+
+The router module in local QEMU precisely matches the \texttt{VirtQueue\-Element} with an ordered ring buffer. Then, the response is injected into the corresponding guest physical memory. The guest driver is kicked via an \texttt{irq} \texttt{ioeventfd} after the local QEMU emits a completion signal into the local \texttt{virtqueue} \textcircled{9}.
+
+\subsection{Local Forwarding}
+The local forwarding module bridges the guest-facing VirtIO path and the cross-host transport. Its main challenge is to process requests concurrently without introducing additional synchronization and data-movement overhead into QEMU's I/O path.
+
+\textbf{SPSC Pipelining.} Transactions for request forwarding and response handling are decoupled via a lock-free Single Producer Single Consumer (SPSC) buffer. A notification from guest awakes a sending handler to forward requests. The handler retrieves available descriptors from the virtqueue and assembles them to network packages. If responses from devices are needed, the sender writes a slot in the SPSC buffer to inform response handler. Otherwise, the sender directly kicks guest. The response handlers starts with polling the socket. Since Mosaic do not guarantee ordered request flow, the receiver traverses the sending window in the SPSC buffer to match a slot for an arrived response. Before kicking the guest, the receiver resorts slots in the buffer to avoid empty holes.
+
+\textbf{Worker Pool and Dispatching.} Stages in the forwarding pipelining are dispatched to an independent thread from a work pool. All remote devices of a Mosaic VM share the same work pool. Mosaic introduces simple hash-mapping algorithm to avoid polling idle threads. Each worker maintains a polling loop to consume submitted tasks. Therefore, hash-conficting virtqueues can directly deliver their tasks to the worker without conflicting handling.
+
+\textbf{Batching and Zero Copy.} Requests may carry payloads of different sizes. For small requests, the fixed cost of transmitting each request dominates the actual data transfer. Mosaic therefore batches multiple small requests before transmission to amortize the per-request communication overhead. For requests with large payloads, Mosaic uses a zero-copy path to avoid unnecessary data movement. For small payloads, Mosaic retains the conventional copy path because the setup cost of zero-copy can outweigh its benefit. The threshold is therefore selected according to the relative cost of copying and zero-copy setup. Additionally, the release of slots in the SPSC buffer needs double check as the kernel holds guest pages until a zero copy completion signal.
+
+Together, SPSC pipelining, worker pooling,  batching, and adaptive zero copy allow the local forwarding path to maintain high request throughput while limiting the additional cost introduced by remote forwarding.
+
+\subsection{Remote Forwarding}
+The remote forwarding module bridges the network-facing request stream and the physical device back-end. Unlike the local side, the remote module must also handle the synchronization and memory-management costs associated with submitting requests to the physical device.
+
+\textbf{Pipelining, Worker Pool, and Zero Copy.} Similar to the local side, the receiving and sending handlers are decoupled and pipelined in remote side. The receiver deparses packages and reconstructs virtio-compilant device requests, while the sender forwards device responses. Both handlers are dispatched to a worker from a shared worker pool with a simple hash-mapping. Remote side do not proactively batch response sending to delivery responses as soon as device finishing processing. Zero copy optimization is introduced in remote side as well.
+
+\textbf{Batched Device Submission.} Though multiple devices enable asynchronous request processing in back-end drivers, they force synchronous request submitting. Therefore, device submission may serialize concurrent requests from local side. Directly submitting each arriving request would therefore expose this serialization to the network-facing path. Mosaic instead accumulates requests that arrive while a previous batch is being processed and submits them together when the current submission completes. This decouples network reception from device submission, allowing incoming requests to continue being received while the physical device processes previously submitted operations.
+
+\textbf{Buffer Pool.} Mosaic maintains a buffer pool for request and response buffers. Without pooling, every forwarded request may require heap allocation and reclamation on the remote fast path. Reusing preallocated buffers avoids this repeated memory-management overhead and provides stable buffer availability under high request rates.
+
+The response path follows the reverse direction. After the physical device completes a request, Mosaic places the completion into the corresponding response path and forwards it through the per-virtqueue connection to the local side. The local forwarding module then completes the corresponding VirtIO descriptor and returns control to QEMU.
+
+\subsection{Implementation Summary}
+We implement the Mosaic runtime system by extending QEMU's virtio with around 4K lines of code. It requires zero modifications to the guest OS drivers, the native device backend logic, and the KVM hardware acceleration path. We first hook the control plane by registering QOM properties on the \texttt{VirtioDeviceClass}. The setters for these properties dynamically override the native call-back functions of \texttt{ioeventfd} handlers to process Mosaic transactions. For data plane interception, a \texttt{remote\_ctx} pointer is injected into the core structure \texttt{VirtQueue}. Eight interfaces of virtio framework are modified, seamlessly diverting local I/O processing to remote handlers. To minimize Mosaic's interference to other local devices, all related threads are registered as QEMU aio iothread. Execution of Mosaic could not block other transactions in the main loop. For remote sides, we leverages an extremely trimmed machine type \texttt{x-remote-machine}, which only contains a PCI bus to plug stranded hardware pieces.
+
+
+\section{Evaluation}\label{eval}
+This section presents the performance evaluation of Mosaic scheduling wrapper and runtime system, using micro- and macro-benchmarks. We ran all experiments on a machine with Intel Core i5-13600 K CPU (5.10 GHz) with 32 GB memory and 500 GB NVMe SSD. Network latencies are deterministically injected by Linux traffic control.
+
+\subsection{Benchmarks}
+
+\subsection{End-to-End Applications}
+
+\section{Related Work}\label{relatedwork}
+\subsection{Virtualization-based Forwarding}
+Virtualization systems have explored separating the virtual device interface from the process that implements the device. QEMU Multi-process moves device emulation out of the main QEMU process and communicates with the device process through a Unix domain socket, improving isolation while retaining the conventional virtual device interface \cite{qemu-multiprocess}. VFIO-user similarly defines an interface between a VMM and a userspace device implementation, allowing a device to be implemented outside the VMM process \cite{vfio-user}. These systems demonstrate that the virtualization layer can serve as a boundary between a VM and the implementation of its devices.
+
+Mosaic builds on this separation principle but extends it across physical hosts. Instead of merely moving device execution to another process on the same machine, Mosaic places the VirtIO front-end and back-end on different hosts and forwards VirtIO transactions over the network. This enables a physical device that is stranded on one host to serve a VM running on another host without modifying the guest-visible device interface. The resulting cross-host forwarding path, however, introduces network latency and additional software overhead that do not exist in local process-level separation. Mosaic therefore focuses on designing an efficient forwarding runtime using asynchronous pipelining, per-virtqueue isolation, batching, and adaptive zero-copy.
+
+\subsection{Hardware-assisted Disaggregation}
+Hardware-assisted disaggregation decouples resources from individual hosts using specialized interconnects and resource fabrics. Recent systems extend this approach beyond memory to physical devices. Oasis pools PCIe devices, including NICs and SSDs, across hosts using CXL infrastructure \cite{oasis}, while DxPU disaggregates GPUs from their physical hosts and exposes them through a shared GPU pool \cite{dxpu}. These systems provide efficient remote access by moving resource sharing into the hardware or fabric layer.
+
+Mosaic takes a complementary software-based approach. Remote devices remain attached to their original hosts, while the virtualization layer exposes them to VMs through the existing VirtIO abstraction. Mosaic therefore requires neither a dedicated device fabric nor specialized hardware, making it applicable to conventional virtualized clusters. The tradeoff is the additional network and software overhead of forwarding device requests, which Mosaic addresses through its optimized runtime.
+
+% \subsection{Resource Disaggregation}
+% Resource disaggregation eliminates stranded resources by enlarging resource quantity or decoupling hardware. Storage and memory are popular resource types for enlarging effective capacity of physical machines. Userspace frameworks, such as distributed storage system~\cite{pegasus, acos, discard, monarch} and distributed shared memory~\cite{drust, tigon, clio, swarm, tmm, chime, spirit}, are widely researched. Protocols, such as NVMe-oF~\cite{nvmeof} and iSCSI~\cite{iscsi}, are proposed to assign stranded storage media in kernel drivers. They encapsulates raw I/O commands into network protocols to minimize analyzing overheads. RDMA is a kernel-bypassing protocol, which is popularly used to disaggregate memories. InfiniSwap~\cite{infiniswap} and FastSwap~\cite{fastswap} assigned remote memory resources to be a swap region of local memory. AIFM~\cite{aifm} utilized aggressive page prefetching and programming analysis to optimize swapping.
+
+% Split-kernel, proposed by LegoOS~\cite{legoos}, is the first kernel paradigm for hardware decoupling. By disseminating computing resources, memory and storage to distributed physical machines, resources are allocated on-demand. Therefore, stranded resources are thoroughly eliminated. Recently, emerging scale up protocols, like CXL~\cite{cxl} and UnifiedBus~\cite{ub}, offers hardware-assisted resource decoupling. They exhibit high performance by directly expanding the bus protocol rather than interpretering it to network protocols. Pond implemented a memory pool based on CXL~\cite{pond} to reduce the rate of resource stranding via dynamic cross-node memory sharing. Built upon UB, CloudMatrix constructed peer-connected supernodes~\cite{cloudmatrix} to support fine-grained on-demand allocation of heterogeneous resources, by enabling unified memory access across XPUs.
+
+\section{Discussion and Conclusion}\label{conclu}
+\textbf{Discussion 1.} Virtio provides vhost data plane acceleration. When I/O devices are declared as vhost devices, the emulator register their handlers as drivers in the host kernel, rather than drivers in the emulator. At runtime, the KVM module directly posts signals to kernel drivers, bypassing the compatibility processing of the emulator~\cite{vhost}. Current Mosaic only supports standard virtio devices, as intercepting happens in the emulator. Introducing accelerations like vhost framework needs modifications to the kernel. However, evaluations on NVMe-oF and iSCSI show the benefits of processing forwarding in kernels. It is a valuable topic to further optimize Mosaic.
+
+\noindent\textbf{Discussion 2.} Mosaic relies on the standardized frontend-backend separation of the virtio ecosystem. While virtio has become the de facto standard for mainstream datacenter I/O~\cite{virtio}, its penetration into specialized hardware remains uneven. Specifically, for emerging AI accelerators~\cite{nvidia, google, ascend}, hardware vendors are highly incentivized by commercial interests to maintain vertically integrated software stacks rather than developing open virtio drivers. Limited vendor support for standardized virtio interfaces restricts Mosaic’s deployment on some closed-source AI workloads.
+
+\noindent\textbf{Conclusion.} In this paper, we present Mosaic, a novel reactive solution to stranded resources. It transparently stitches stranded resources across multiple hosts to form an allocatable resource set, which serves MosaicVM. Mosaic introduces a scheduling wrapper to reuse indivisible scheduler for cross-host scheduling. Additionally, the runtime system of Mosaic is designed and implemented in the emulator, requiring zero modifications to guest and host OSes. Comprehensive evaluations demonstrate that Mosaic efficiently stitches stranded hardware to significantly boost acceptance rates within a tolerable slowdown.
+
+\newpage
+
+\bibliography{src/ref}
+
+\end{document}
+\endinput
+%%
+%% End of file sample-acmcp.tex'.
