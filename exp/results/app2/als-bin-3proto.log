@@ -1,0 +1,43 @@
+=== [14:06:12] APP2 als svm (data=/mnt/data/ratings_big.bin, delay=0us): start ===
+vr.conf -> W=4 I=256 B=16
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0775235 s, 1.7 GB/s
+  svm c1 r1: links=200000760 build=2.297s train=49.367s total=51.664s
+  svm c2 r1: links=200000760 build=2.192s train=54.415s total=56.607s
+  svm c4 r1: links=200000760 build=2.303s train=56.413s total=58.716s
+APP2_als_svm_OK [14:09:40]
+=== [14:09:41] APP2 als nvmeof (data=/mnt/data/ratings_big.bin, delay=0us): start ===
+NQN:nqn.2026-08.svm:data disconnected 0 controller(s)
+bash: line 1: /sys/kernel/config/nvmet/subsystems/nqn.2026-08.svm:data/namespaces/1/enable: No such file or directory
+  nvmeof loop=/dev/loop32
+connecting to device: nvme1
+  SSH up after 6
+134217728 bytes (134 MB, 128 MiB) copied, 0.0605061 s, 2.2 GB/s
+  nvmeof c1 r1: links=200000760 build=1.972s train=51.624s total=53.597s
+  nvmeof c2 r1: links=200000760 build=2.006s train=50.587s total=52.594s
+  nvmeof c4 r1: links=200000760 build=2.067s train=50.827s total=52.895s
+NQN:nqn.2026-08.svm:data disconnected 1 controller(s)
+APP2_als_nvmeof_OK [14:13:27]
+=== [14:13:27] APP2 als iscsi (data=/mnt/data/ratings_big.bin, delay=0us): start ===
+  iscsi loop=/dev/loop32
+Created block storage object svmmacro using /dev/loop32.
+Created target iqn.2026-08.com.svm:data.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+Created LUN 0.
+Created Node ACL for iqn.2026-08.com.svm:init
+Created mapped LUN 0.
+127.0.0.1:3260,1 iqn.2026-08.com.svm:data
+Logging in to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Login to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0684549 s, 2.0 GB/s
+  iscsi c1 r1: links=200000760 build=5.375s train=116.975s total=122.350s
+  iscsi c2 r1: links=200000760 build=5.602s train=118.462s total=124.064s
+  iscsi c4 r1: links=200000760 build=5.181s train=118.724s total=123.904s
+Logging out of session [sid: 8, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Logout of [sid: 8, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+Deleted Target iqn.2026-08.com.svm:data.
+Deleted storage object svmmacro.
+APP2_als_iscsi_OK [14:20:20]

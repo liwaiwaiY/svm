@@ -1,0 +1,56 @@
+##### [15:08:33] kvm #####
+=== [15:08:33] APP2 xgb kvm (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+[sudo] password for waiai:   SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0402505 s, 3.4 GB/s
+  kvm c1 r1: links=5000000 build=3.920s train=27.912s total=31.832s
+  kvm c2 r1: links=5000000 build=3.774s train=15.581s total=19.356s
+  kvm c4 r1: links=5000000 build=3.768s train=9.026s total=12.794s
+APP2_xgb_kvm_OK [15:10:19]
+##### [15:10:19] svm #####
+=== [15:10:19] APP2 xgb svm (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+vr.conf -> W=4 I=256 B=16
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0704359 s, 1.9 GB/s
+  svm c1 r1: links=5000000 build=4.311s train=27.937s total=32.248s
+  svm c2 r1: links=5000000 build=4.034s train=15.678s total=19.712s
+  svm c4 r1: links=5000000 build=4.394s train=10.938s total=15.332s
+./run_app2.sh: line 65: 2228508 Killed                  setsid remote-stub -smp 4 -drive file=$H/exp/remote/fio.raw,if=none,id=drive1,format=raw,cache=none -device virtio-blk-pci,drive=drive1,serial=data-disk,remote-stub=127.0.0.1@5552 -display none -monitor none -serial file:/tmp/stub-blk.log > /tmp/stub-out.log 2>&1 < /dev/null
+APP2_xgb_svm_OK [15:12:07]
+##### [15:12:07] nvmeof #####
+=== [15:12:07] APP2 xgb nvmeof (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+NQN:nqn.2026-08.svm:data disconnected 0 controller(s)
+bash: line 1: /sys/kernel/config/nvmet/subsystems/nqn.2026-08.svm:data/namespaces/1/enable: No such file or directory
+  nvmeof loop=/dev/loop32
+connecting to device: nvme1
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0545355 s, 2.5 GB/s
+  nvmeof c1 r1: links=5000000 build=4.127s train=27.898s total=32.025s
+  nvmeof c2 r1: links=5000000 build=3.802s train=15.520s total=19.323s
+  nvmeof c4 r1: links=5000000 build=3.804s train=8.993s total=12.797s
+NQN:nqn.2026-08.svm:data disconnected 1 controller(s)
+APP2_xgb_nvmeof_OK [15:13:54]
+##### [15:13:54] iscsi #####
+=== [15:13:54] APP2 xgb iscsi (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+  iscsi loop=/dev/loop32
+Created block storage object svmmacro using /dev/loop32.
+Created target iqn.2026-08.com.svm:data.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+Created LUN 0.
+Created Node ACL for iqn.2026-08.com.svm:init
+Created mapped LUN 0.
+127.0.0.1:3260,1 iqn.2026-08.com.svm:data
+Logging in to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Login to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.166484 s, 809 MB/s
+  iscsi c1 r1: links=5000000 build=3.811s train=27.996s total=31.808s
+  iscsi c2 r1: links=5000000 build=3.865s train=15.461s total=19.326s
+  iscsi c4 r1: links=5000000 build=3.732s train=8.949s total=12.681s
+Logging out of session [sid: 11, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Logout of [sid: 11, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+Deleted Target iqn.2026-08.com.svm:data.
+Deleted storage object svmmacro.
+APP2_xgb_iscsi_OK [15:15:41]
+ALL_DONE

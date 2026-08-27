@@ -1,0 +1,56 @@
+##### [14:51:58] kvm #####
+=== [14:51:58] APP2 als kvm (data=/mnt/data/ratings_big.csv, delay=0us): start ===
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0585022 s, 2.3 GB/s
+  kvm c1 r1: links=200000760 build=28.105s train=0.000s total=28.105s
+  kvm c2 r1: links=200000760 build=16.800s train=0.000s total=16.800s
+  kvm c4 r1: links=200000760 build=11.654s train=0.000s total=11.654s
+APP2_als_kvm_OK [14:53:37]
+##### [14:53:37] svm #####
+=== [14:53:37] APP2 als svm (data=/mnt/data/ratings_big.csv, delay=0us): start ===
+vr.conf -> W=4 I=256 B=16
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0608646 s, 2.2 GB/s
+  svm c1 r1: links=200000760 build=30.322s train=0.000s total=30.322s
+  svm c2 r1: links=200000760 build=15.298s train=0.000s total=15.298s
+  svm c4 r1: links=200000760 build=9.382s train=0.000s total=9.382s
+./run_app2.sh: line 65: 2107652 Killed                  setsid remote-stub -smp 4 -drive file=$H/exp/remote/fio.raw,if=none,id=drive1,format=raw,cache=none -device virtio-blk-pci,drive=drive1,serial=data-disk,remote-stub=127.0.0.1@5552 -display none -monitor none -serial file:/tmp/stub-blk.log > /tmp/stub-out.log 2>&1 < /dev/null
+APP2_als_svm_OK [14:55:13]
+##### [14:55:13] nvmeof #####
+=== [14:55:13] APP2 als nvmeof (data=/mnt/data/ratings_big.csv, delay=0us): start ===
+NQN:nqn.2026-08.svm:data disconnected 0 controller(s)
+bash: line 1: /sys/kernel/config/nvmet/subsystems/nqn.2026-08.svm:data/namespaces/1/enable: No such file or directory
+  nvmeof loop=/dev/loop32
+connecting to device: nvme1
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0887866 s, 1.5 GB/s
+  nvmeof c1 r1: links=200000760 build=27.242s train=0.000s total=27.242s
+  nvmeof c2 r1: links=200000760 build=16.572s train=0.000s total=16.572s
+  nvmeof c4 r1: links=200000760 build=11.497s train=0.000s total=11.497s
+NQN:nqn.2026-08.svm:data disconnected 1 controller(s)
+APP2_als_nvmeof_OK [14:56:52]
+##### [14:56:52] iscsi #####
+=== [14:56:52] APP2 als iscsi (data=/mnt/data/ratings_big.csv, delay=0us): start ===
+  iscsi loop=/dev/loop32
+Created block storage object svmmacro using /dev/loop32.
+Created target iqn.2026-08.com.svm:data.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+Created LUN 0.
+Created Node ACL for iqn.2026-08.com.svm:init
+Created mapped LUN 0.
+127.0.0.1:3260,1 iqn.2026-08.com.svm:data
+Logging in to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Login to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0920489 s, 1.5 GB/s
+  iscsi c1 r1: links=200000760 build=29.468s train=0.000s total=29.468s
+  iscsi c2 r1: links=200000760 build=21.116s train=0.000s total=21.116s
+  iscsi c4 r1: links=200000760 build=25.579s train=0.000s total=25.579s
+Logging out of session [sid: 10, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Logout of [sid: 10, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+Deleted Target iqn.2026-08.com.svm:data.
+Deleted storage object svmmacro.
+APP2_als_iscsi_OK [14:58:52]
+ALL_DONE

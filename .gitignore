@@ -1,2 +1,14 @@
 test_cripts/
-exp/
+
+# 磁盘镜像（10G+，禁止入 git）
+*.raw
+
+# 数据集 / 二进制（大文件）
+*.bin
+*.npy
+exp/data/ml-25m/
+exp/data/ml-25.zip/
+
+# Python 缓存
+__pycache__/
+*.pyc

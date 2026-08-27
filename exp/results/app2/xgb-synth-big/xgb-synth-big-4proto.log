@@ -1,0 +1,50 @@
+##### [15:21:58] kvm #####
+=== [15:21:58] APP2 xgb kvm (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0495688 s, 2.7 GB/s
+  kvm c1 r1: links=? build=?s train=?s total=?s
+  kvm c2 r1: links=? build=?s train=?s total=?s
+  kvm c4 r1: links=? build=?s train=?s total=?s
+APP2_xgb_kvm_OK [15:22:57]
+##### [15:22:57] svm #####
+=== [15:22:57] APP2 xgb svm (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+vr.conf -> W=4 I=256 B=16
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.0897185 s, 1.5 GB/s
+  svm c1 r1: links=? build=?s train=?s total=?s
+  svm c2 r1: links=? build=?s train=?s total=?s
+  svm c4 r1: links=? build=?s train=?s total=?s
+./run_app2.sh: line 65: 2339247 Killed                  setsid remote-stub -smp 4 -drive file=$H/exp/remote/fio.raw,if=none,id=drive1,format=raw,cache=none -device virtio-blk-pci,drive=drive1,serial=data-disk,remote-stub=127.0.0.1@5552 -display none -monitor none -serial file:/tmp/stub-blk.log > /tmp/stub-out.log 2>&1 < /dev/null
+APP2_xgb_svm_OK [15:23:59]
+##### [15:23:59] nvmeof #####
+=== [15:23:59] APP2 xgb nvmeof (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+NQN:nqn.2026-08.svm:data disconnected 0 controller(s)
+bash: line 1: /sys/kernel/config/nvmet/subsystems/nqn.2026-08.svm:data/namespaces/1/enable: No such file or directory
+  nvmeof loop=/dev/loop32
+connecting to device: nvme1
+  SSH up after 6
+134217728 bytes (134 MB, 128 MiB) copied, 0.0612881 s, 2.2 GB/s
+  nvmeof c1 r1: links=? build=?s train=?s total=?s
+  nvmeof c2 r1: links=? build=?s train=?s total=?s
+  nvmeof c4 r1: links=? build=?s train=?s total=?s
+NQN:nqn.2026-08.svm:data disconnected 1 controller(s)
+APP2_xgb_nvmeof_OK [15:25:25]
+##### [15:25:25] iscsi #####
+=== [15:25:25] APP2 xgb iscsi (data=/mnt/data/xgb_synth.csv, delay=0us): start ===
+  iscsi loop=/dev/loop32
+Created block storage object svmmacro using /dev/loop32.
+Created target iqn.2026-08.com.svm:data.
+Created TPG 1.
+Global pref auto_add_default_portal=true
+Created default portal listening on all IPs (0.0.0.0), port 3260.
+Created LUN 0.
+Created Node ACL for iqn.2026-08.com.svm:init
+Created mapped LUN 0.
+127.0.0.1:3260,1 iqn.2026-08.com.svm:data
+Logging in to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260]
+Login to [iface: default, target: iqn.2026-08.com.svm:data, portal: 127.0.0.1,3260] successful.
+  SSH up after 3
+134217728 bytes (134 MB, 128 MiB) copied, 0.297215 s, 452 MB/s
+  iscsi c1 r1: links=? build=?s train=?s total=?s
+  iscsi c2 r1: links=? build=?s train=?s total=?s
+  iscsi c4 r1: links=? build=?s train=?s total=?s

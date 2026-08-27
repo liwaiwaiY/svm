@@ -1,0 +1,17 @@
+[ALS-IO] pass1: parallel C-scan /mnt/data/ratings_big.csv (4 segs) ...
+[ALS-IO] total rows=200000757 segs=[(32, 1428387942), (1428387942, 2856775886), (2856775886, 4285163811), (4285163811, 5713551777)]
+[ALS-IO] pass2: parallel pandas parse (keep=0.0250) ...
+[ALS-IO] sampled=4998581 users=1300336 items=646140
+[ALS-IO] build done 10.38s
+[ALS-IO] training ... cores=4 iters=20 factors=128
+[ALS-IO]   iter 2/20 done
+[ALS-IO]   iter 4/20 done
+[ALS-IO]   iter 6/20 done
+[ALS-IO]   iter 8/20 done
+[ALS-IO]   iter 10/20 done
+[ALS-IO]   iter 12/20 done
+[ALS-IO]   iter 14/20 done
+[ALS-IO]   iter 16/20 done
+[ALS-IO]   iter 18/20 done
+[ALS-IO]   iter 20/20 done
+[ALS-IO] links=200000760 build_s=10.382 train_s=26.613 total_s=36.995

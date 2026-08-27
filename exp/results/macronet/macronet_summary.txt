@@ -1,0 +1,6 @@
+nvmeof  t1: tps=[158.28, 161.45, 110.63] mean=143.5 median=158.3 best2=159.9
+nvmeof  t2: tps=[221.5, 217.56, 176.32] mean=205.1 median=217.6 best2=219.5
+nvmeof  t4: tps=[273.79, 290.64, 222.93] mean=262.5 median=273.8 best2=282.2
+iscsi   t1: tps=[109.3, 119.43, 132.45] mean=120.4 median=119.4 best2=125.9
+iscsi   t2: tps=[171.62, 216.9, 216.92] mean=201.8 median=216.9 best2=216.9
+iscsi   t4: tps=[249.5, 236.71, 264.17] mean=250.1 median=249.5 best2=256.8

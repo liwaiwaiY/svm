@@ -1,0 +1,31 @@
+App pagerank @ eff RTT ~150us (netem 50us, injected after env ready), 10 iters, drop_caches/run
+KVM/SVM: 22:30-22:34 (back-to-back); nvmeof/iscsi: 23:58-00:02 (back-to-back, later hour)
+NOTE: cross-session compare subject to KINGSTON drive-phase noise (+-55%); same-session back-to-back is authoritative
+
+proto   c   build_s  sort_s iter_sum  total_s
+------------------------------------------------
+kvm      1    5.376   1.490     32.7   39.556
+kvm      2    4.773   1.188     21.3   27.272
+kvm      4    3.711   1.235     18.1   23.034
+
+svm      1    5.835   1.459     31.9   39.180
+svm      2    4.227   1.041     19.7   24.944
+svm      4    3.768   1.143     16.8   21.670
+
+nvmeof   1    5.376   1.393     31.5   38.244
+nvmeof   2    4.189   0.946     19.1   24.252
+nvmeof   4    3.587   0.974     16.3   20.847
+
+iscsi    1    5.310   1.406     31.6   38.314
+iscsi    2    4.460   1.029     19.1   24.640
+iscsi    4    3.624   1.008     16.4   21.054
+
+SVM/KVM (22:30-22:34 same session):
+  c1: svm 39.180s vs kvm 39.556s = -1.0%
+  c2: svm 24.944s vs kvm 27.272s = -8.5%
+  c4: svm 21.670s vs kvm 23.034s = -5.9%
+
+nvmeof/iscsi (00:00 same session):
+  c1: iscsi 38.314s vs nvmeof 38.244s = +0.2%
+  c2: iscsi 24.640s vs nvmeof 24.252s = +1.6%
+  c4: iscsi 21.054s vs nvmeof 20.847s = +1.0%

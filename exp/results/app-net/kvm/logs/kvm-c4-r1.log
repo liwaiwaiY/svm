@@ -1,0 +1,16 @@
+=== PAGERANK SUMMARY ===
+edge_file=/mnt/data/wiki/wiki-Talk-1m.txt
+iterations=10 cores=4 links=66623
+build_s=3.622 sort_s=0.986
+iter_s=1.001,1.477,1.340,1.418,1.578,1.589,1.759,1.886,1.950,2.147
+total_s=20.753
+33 rank=19.798855
+1764 rank=11.219238
+4251 rank=9.462049
+1113 rank=9.254204
+4709 rank=9.069880
+952 rank=8.823452
+3 rank=8.262297
+127 rank=8.056797
+1882 rank=7.910007
+145 rank=7.794254

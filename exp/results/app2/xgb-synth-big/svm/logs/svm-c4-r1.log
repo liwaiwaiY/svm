@@ -1,0 +1,31 @@
+[XGB] building DMatrix from /mnt/data/xgb_synth.csv ...
+/usr/local/lib/python3.14/dist-packages/xgboost/data.py:1363: UserWarning: [07:23:29] WARNING: /__w/xgboost/xgboost/src/data/data.cc:932: Text file input has been deprecated since 3.1
+  return _from_uri(data, missing, feature_names, feature_types)
+Traceback (most recent call last):
+  File "/home/wai/xgb_train.py", line 43, in <module>
+    main()
+    ~~~~^^
+  File "/home/wai/xgb_train.py", line 18, in main
+    dtrain = xgb.DMatrix(
+        path + "?format=csv&label_column=0",
+        nthread=cores)
+  File "/usr/local/lib/python3.14/dist-packages/xgboost/core.py", line 569, in inner_f
+    return func(**kwargs)
+  File "/usr/local/lib/python3.14/dist-packages/xgboost/core.py", line 825, in __init__
+    handle, feature_names, feature_types = dispatch_data_backend(
+                                           ~~~~~~~~~~~~~~~~~~~~~^
+        data=data,
+        ^^^^^^^^^^
+    ...<4 lines>...
+        enable_categorical=enable_categorical,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/usr/local/lib/python3.14/dist-packages/xgboost/data.py", line 1363, in dispatch_data_backend
+    return _from_uri(data, missing, feature_names, feature_types)
+  File "/usr/local/lib/python3.14/dist-packages/xgboost/data.py", line 1229, in _from_uri
+    _check_call(_LIB.XGDMatrixCreateFromURI(config, ctypes.byref(handle)))
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.14/dist-packages/xgboost/_c_api.py", line 190, in _check_call
+    raise XGBoostError(py_str(_LIB.XGBGetLastError()))
+xgboost._c_api.XGBoostError: std::bad_alloc

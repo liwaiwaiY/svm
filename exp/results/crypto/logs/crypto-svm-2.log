@@ -1,0 +1,65 @@
+=== tier=2 2026-08-22T07:14:14+00:00 host=wai ===
+WARN: aesni_intel present, unloading
+[sudo: authenticate] Password: 
+--- cbc(aes) impls (top = highest priority, chosen by kernel) ---
+name         : cbc(aes)
+driver       : virtio_crypto_aes_cbc
+priority     : 150
+name         : cbc(aes)
+driver       : cbc(ecb(aes-lib))
+priority     : 100
+--- lsmod virtio/aesni ---
+virtio_crypto          45056  0
+crypto_engine          28672  1 virtio_crypto
+=== RUN 1 07:14:15 ===
+Engine "afalg" set.
+You have chosen to measure elapsed time instead of user CPU time.
+Doing aes-128-cbc ops for 3s on 16 size blocks: 44879 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 64 size blocks: 46838 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 256 size blocks: 47031 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 1024 size blocks: 46993 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 8192 size blocks: 43817 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 16384 size blocks: 30703 aes-128-cbc ops in 3.00s
+version: 3.5.5
+built on: Wed Jul 29 16:50:53 2026 UTC
+options: bn(64,64)
+compiler: gcc -fPIC -pthread -m64 -Wa,--noexecstack -Wall -fzero-call-used-regs=used-gpr -Wa,--noexecstack -g -O2 -Werror=implicit-function-declaration -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=. -fstack-protector-strong -fstack-clash-protection -Wformat -Werror=format-security -fcf-protection -fdebug-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=/usr/src/openssl-3.5.5-1ubuntu3.3 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSL_BUILDING_OPENSSL -DZLIB -DZSTD -DNDEBUG -Wdate-time -D_FORTIFY_SOURCE=3
+CPUINFO: OPENSSL_ia32cap=0xfffa32234f8bffff:0x184007bc219c27eb:0x00000810bc104410:0x0000000000000000:0x0000000000000000
+The 'numbers' are in 1000s of bytes per second processed.
+type             16 bytes     64 bytes    256 bytes   1024 bytes   8192 bytes  16384 bytes
+aes-128-cbc        239.35k      999.21k     4013.31k    16040.28k   119649.62k   167679.32k
+=== RUN 2 07:14:33 ===
+Engine "afalg" set.
+You have chosen to measure elapsed time instead of user CPU time.
+Doing aes-128-cbc ops for 3s on 16 size blocks: 51207 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 64 size blocks: 52159 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 256 size blocks: 53463 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 1024 size blocks: 49064 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 8192 size blocks: 43869 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 16384 size blocks: 30118 aes-128-cbc ops in 3.00s
+version: 3.5.5
+built on: Wed Jul 29 16:50:53 2026 UTC
+options: bn(64,64)
+compiler: gcc -fPIC -pthread -m64 -Wa,--noexecstack -Wall -fzero-call-used-regs=used-gpr -Wa,--noexecstack -g -O2 -Werror=implicit-function-declaration -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=. -fstack-protector-strong -fstack-clash-protection -Wformat -Werror=format-security -fcf-protection -fdebug-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=/usr/src/openssl-3.5.5-1ubuntu3.3 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSL_BUILDING_OPENSSL -DZLIB -DZSTD -DNDEBUG -Wdate-time -D_FORTIFY_SOURCE=3
+CPUINFO: OPENSSL_ia32cap=0xfffa32234f8bffff:0x184007bc219c27eb:0x00000810bc104410:0x0000000000000000:0x0000000000000000
+The 'numbers' are in 1000s of bytes per second processed.
+type             16 bytes     64 bytes    256 bytes   1024 bytes   8192 bytes  16384 bytes
+aes-128-cbc        273.10k     1112.73k     4562.18k    16747.18k   119791.62k   164484.44k
+=== RUN 3 07:14:51 ===
+Engine "afalg" set.
+You have chosen to measure elapsed time instead of user CPU time.
+Doing aes-128-cbc ops for 3s on 16 size blocks: 46851 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 64 size blocks: 50961 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 256 size blocks: 49412 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 1024 size blocks: 54246 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 8192 size blocks: 41120 aes-128-cbc ops in 3.00s
+Doing aes-128-cbc ops for 3s on 16384 size blocks: 30548 aes-128-cbc ops in 3.00s
+version: 3.5.5
+built on: Wed Jul 29 16:50:53 2026 UTC
+options: bn(64,64)
+compiler: gcc -fPIC -pthread -m64 -Wa,--noexecstack -Wall -fzero-call-used-regs=used-gpr -Wa,--noexecstack -g -O2 -Werror=implicit-function-declaration -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=. -fstack-protector-strong -fstack-clash-protection -Wformat -Werror=format-security -fcf-protection -fdebug-prefix-map=/build/openssl-zpw3BG/openssl-3.5.5=/usr/src/openssl-3.5.5-1ubuntu3.3 -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSL_BUILDING_OPENSSL -DZLIB -DZSTD -DNDEBUG -Wdate-time -D_FORTIFY_SOURCE=3
+CPUINFO: OPENSSL_ia32cap=0xfffa32234f8bffff:0x184007bc219c27eb:0x00000810bc104410:0x0000000000000000:0x0000000000000000
+The 'numbers' are in 1000s of bytes per second processed.
+type             16 bytes     64 bytes    256 bytes   1024 bytes   8192 bytes  16384 bytes
+aes-128-cbc        249.87k     1087.17k     4216.49k    18515.97k   112285.01k   166832.81k
+ALL DONE tier=2

@@ -1,0 +1,6 @@
+[XGB] build: pass1 align /mnt/data/xgb_synth.csv (4 segs) ...
+[XGB] build: pass2 pandas parse x4 ...
+[XGB] parsing done rows=6000000 X=(6000000, 28)
+[XGB] build 6.70s
+[XGB] training ... cores=4 rounds=16 (per-round full re-scan /mnt/data/xgb_synth.csv)
+[XGB] links=6000000 build_s=6.704 train_s=50.537 total_s=57.241

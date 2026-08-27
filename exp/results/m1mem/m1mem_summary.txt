@@ -1,0 +1,26 @@
+== M1 mem: mean/max (kB; virtio-remote total = local+stub+skmem) ==
+cell           total-mean  total-max  local-mean  local-max  stub-mean  stub-max  skmem-mean  skmem-max
+svm_z0_64k        915721    916304      881357     881528      34326     34812       38298     158528  (n=60)
+svm_z0_512k       935011    937428      899083     899384      35745     37548      188038     710976  (n=60)
+svm_z0_1m         923415    925777      885613     885792      37530     39276      278190    1557120  (n=60)
+svm_z0_2m         961156    963926      913590     913752      47139     49620      437298    1500736  (n=60)
+svm_z4m_64k       942051    942588      907998     908144      34029     34448       24687     135120  (n=60)
+svm_z4m_512k      954489    955423      918365     918528      36009     36632      117527     732270  (n=60)
+svm_z4m_1m        946998    949263      907761     907908      38969     40728      275340    1064048  (n=60)
+svm_z4m_2m        954106    957575      905434     905556      48166     50908      518291    1994518  (n=60)
+kvm_64k           853256    853256      853256     853256          0         0           0          0  (n=60)
+kvm_512k          875783    875784      875783     875784          0         0           0          0  (n=60)
+kvm_1m            878215    878216      878215     878216          0         0           0          0  (n=60)
+kvm_2m            882431    882440      882431     882440          0         0           0          0  (n=60)
+
+-- zc effect (skmem, kernel socket buffer, max) --
+  bs=64k: zc=0 med 13248 B vs zc=4M med 1064 B
+  bs=512k: zc=0 med 26496 B vs zc=4M med 2909 B
+  bs=1m: zc=0 med 158528 B vs zc=4M med 134778 B
+  bs=2m: zc=0 med 383552 B vs zc=4M med 277731 B
+
+-- SVM vs KVM: RSS(local+stub) increase % (mean) --
+  bs=64k: zc: +7.3% (local +3.3%, stub 4.0%) | copy: +10.4% (local +6.4%, stub 4.0%)
+  bs=512k: zc: +6.7% (local +2.7%, stub 4.1%) | copy: +9.0% (local +4.9%, stub 4.1%)
+  bs=1m: zc: +5.1% (local +0.8%, stub 4.3%) | copy: +7.8% (local +3.4%, stub 4.4%)
+  bs=2m: zc: +8.9% (local +3.5%, stub 5.3%) | copy: +8.1% (local +2.6%, stub 5.5%)

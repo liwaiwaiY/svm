@@ -1,0 +1,66 @@
+=== PAGERANK SUMMARY ===
+edge_file=/mnt/data/wiki/wiki-Talk-1m.txt
+iterations=10 cores=4 links=66623
+build_s=3.568 sort_s=1.045
+iter_s=0.984,1.390,1.358,1.456,1.548,1.669,1.749,1.807,2.027,2.045
+total_s=20.644
+33 rank=19.798855
+1764 rank=11.219238
+4251 rank=9.462049
+1113 rank=9.254204
+4709 rank=9.069880
+952 rank=8.823452
+3 rank=8.262297
+127 rank=8.056797
+1882 rank=7.910007
+145 rank=7.794254
+WARNING: Using incubator modules: jdk.incubator.vector
+Using Spark's default log4j profile: org/apache/spark/log4j2-defaults.properties
+26/08/21 17:08:32 WARN Utils: Your hostname, wai, resolves to a loopback address: 127.0.1.1; using 10.0.2.15 instead (on interface ens4)
+26/08/21 17:08:32 WARN Utils: Set SPARK_LOCAL_IP if you need to bind to another address
+Using Spark's default log4j profile: org/apache/spark/log4j2-defaults.properties
+26/08/21 17:08:32 INFO SparkContext: Running Spark version 4.2.0
+26/08/21 17:08:32 INFO SparkContext: OS info Linux, 7.0.0-30-generic, amd64
+26/08/21 17:08:32 INFO SparkContext: Java version 17.0.19+10-1-26.04.2-Ubuntu
+26/08/21 17:08:32 WARN NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable
+26/08/21 17:08:33 WARN SparkConf: Note that spark.local.dir will be overridden by the value set by the cluster manager (via SPARK_LOCAL_DIRS in standalone/kubernetes and LOCAL_DIRS in YARN).
+26/08/21 17:08:33 INFO ResourceUtils: ==============================================================
+26/08/21 17:08:33 INFO ResourceUtils: No custom resources configured for spark.driver.
+26/08/21 17:08:33 INFO ResourceUtils: ==============================================================
+26/08/21 17:08:33 INFO SparkContext: Submitted application: WikiPageRank
+26/08/21 17:08:33 INFO SecurityManager: Changing view acls to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing modify acls to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing view acls groups to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing modify acls groups to: root
+26/08/21 17:08:33 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users with view permissions: root groups with view permissions: EMPTY; users with modify permissions: root; groups with modify permissions: EMPTY; RPC SSL disabled
+26/08/21 17:08:33 INFO Utils: Successfully started service 'sparkDriver' on port 42703.
+26/08/21 17:08:33 INFO SparkEnv: Registering MapOutputTracker
+26/08/21 17:08:33 INFO SparkEnv: Registering BlockManagerMaster
+26/08/21 17:08:33 INFO BlockManagerMasterEndpoint: Using org.apache.spark.storage.DefaultTopologyMapper for getting topology information
+26/08/21 17:08:33 INFO BlockManagerMasterEndpoint: BlockManagerMasterEndpoint up
+26/08/21 17:08:33 INFO SparkEnv: Registering BlockManagerMasterHeartbeat
+26/08/21 17:08:33 INFO DiskBlockManager: Created local directory at /mnt/data/spark-tmp/blockmgr-de8deeba-4125-487a-abfc-72d8d01fe1df
+26/08/21 17:08:33 INFO SparkEnv: Registering OutputCommitCoordinator
+26/08/21 17:08:33 INFO JettyUtils: Start Jetty 0.0.0.0:4040 for SparkUI
+26/08/21 17:08:33 INFO Utils: Successfully started service 'SparkUI' on port 4040.
+26/08/21 17:08:33 INFO ResourceProfile: Default ResourceProfile created, executor resources: Map(cores -> name: cores, amount: 1, script: , vendor: , memory -> name: memory, amount: 1024, script: , vendor: , offHeap -> name: offHeap, amount: 0, script: , vendor: ), task resources: Map(cpus -> name: cpus, amount: 1.0)
+26/08/21 17:08:33 INFO ResourceProfile: Limiting resource is cpu
+26/08/21 17:08:33 INFO ResourceProfileManager: Added ResourceProfile id: 0
+26/08/21 17:08:33 INFO SecurityManager: Changing view acls to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing modify acls to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing view acls groups to: root
+26/08/21 17:08:33 INFO SecurityManager: Changing modify acls groups to: root
+26/08/21 17:08:33 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users with view permissions: root groups with view permissions: EMPTY; users with modify permissions: root; groups with modify permissions: EMPTY; RPC SSL disabled
+26/08/21 17:08:33 INFO Executor: Starting executor ID driver on host 10.0.2.15
+26/08/21 17:08:33 INFO Executor: Running Spark version 4.2.0
+26/08/21 17:08:33 INFO Executor: OS info Linux, 7.0.0-30-generic, amd64
+26/08/21 17:08:33 INFO Executor: Java version 17.0.19+10-1-26.04.2-Ubuntu
+26/08/21 17:08:33 INFO Executor: Starting executor with user classpath (userClassPathFirst = false): ''
+26/08/21 17:08:33 INFO Executor: Created or updated repl class loader org.apache.spark.util.MutableURLClassLoader@8d41c4d for default.
+26/08/21 17:08:33 INFO Utils: Successfully started service 'org.apache.spark.network.netty.NettyBlockTransferService' on port 35201.
+26/08/21 17:08:33 INFO NettyBlockTransferService: Server created on 10.0.2.15:35201
+26/08/21 17:08:33 INFO BlockManager: Using org.apache.spark.storage.RandomBlockReplicationPolicy for block replication policy
+26/08/21 17:08:33 INFO BlockManagerMaster: Registering BlockManager BlockManagerId(driver, 10.0.2.15, 35201, None)
+26/08/21 17:08:33 INFO BlockManagerMasterEndpoint: Registering block manager 10.0.2.15:35201 with 434.4 MiB RAM, BlockManagerId(driver, 10.0.2.15, 35201, None)
+26/08/21 17:08:33 INFO BlockManagerMaster: Registered BlockManager BlockManagerId(driver, 10.0.2.15, 35201, None)
+26/08/21 17:08:33 INFO BlockManager: Initialized BlockManager: BlockManagerId(driver, 10.0.2.15, 35201, None)

@@ -1,0 +1,6 @@
+[XGB] building DMatrix from /mnt/data/xgb_synth.csv ...
+/usr/local/lib/python3.14/dist-packages/xgboost/data.py:1363: UserWarning: [07:15:05] WARNING: /__w/xgboost/xgboost/src/data/data.cc:932: Text file input has been deprecated since 3.1
+  return _from_uri(data, missing, feature_names, feature_types)
+[XGB] rows=5000000 build 3.73s
+[XGB] training ... cores=4 rounds=20
+[XGB] links=5000000 build_s=3.732 train_s=8.949 total_s=12.681

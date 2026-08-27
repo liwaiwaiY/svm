@@ -1,0 +1,6 @@
+[ALS-BIN] build(csv): pass1 C-scan /mnt/data/ratings_big.csv (4 segs) ...
+[ALS-BIN] total rows=200000757
+[ALS-BIN] build(csv): pass2 pandas parse (keep=0.0250) ...
+[ALS-BIN] max_u=1300335 max_i=646139 sampled=4998581 users=1300336 items=646140
+[ALS-BIN] build done 9.38s
+[ALS-BIN] links=200000760 build_s=9.382 train_s=0.000 total_s=9.382

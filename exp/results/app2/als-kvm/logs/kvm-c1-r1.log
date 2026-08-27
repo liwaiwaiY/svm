@@ -1,0 +1,5 @@
+[ALS-BIN] build: scan /mnt/data/ratings_big.bin (200M recs, 2.40GB) ...
+[ALS-BIN] max_u=1300335 max_i=646139 sampled=5000898 users=1300336 items=646140
+[ALS-BIN] build done 3.01s
+[ALS-BIN] training ... cores=1 iters=0 factors=128
+[ALS-BIN] links=200000760 build_s=3.007 train_s=1.812 total_s=4.819
