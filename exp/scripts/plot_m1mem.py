@@ -3,7 +3,7 @@
 
 Reads exp/results/m1mem/<tag>.samples (60 samples: ts local_kB stub_kB skmem_B).
 Each bar = mean local + mean stub (skmem excluded from bars; see summary txt).
-Emits one PNG per bs (manual review, do NOT feed to the model) + text summary.
+Emits PNG+SVG (manual review, do NOT feed to the model) + text summary.
 """
 import os, sys
 import matplotlib
@@ -18,6 +18,7 @@ CELLS = ["svm_z0_64k", "svm_z0_512k", "svm_z0_1m", "svm_z0_2m",
          "svm_z4m_64k", "svm_z4m_512k", "svm_z4m_1m", "svm_z4m_2m",
          "kvm_64k", "kvm_512k", "kvm_1m", "kvm_2m"]
 BS = ("64k", "512k", "1m", "2m")
+BS_PLOT = ("64k", "512k", "1m")   # plots exclude 2M (zc/copy 反号 + 大块噪声)
 LABELS = {
     "svm_z0_64k":  "SVM zc=0 64K",
     "svm_z0_512k": "SVM zc=0 512K",
@@ -60,7 +61,8 @@ def med(v):
     return s[len(s) // 2]
 
 def stacked_bar(ax, data, bs):
-    """Stacked bars for one bs: local (bottom) + stub (top), one bar per cell."""
+    """Stacked bars for one bs: local (bottom) + stub (top), one bar per cell.
+    Max whisker = max over samples of (local+stub+skmem/1024)."""
     cells = [c for c in CELLS if c.endswith(bs)]
     loc = [mean(data[c]["local"]) for c in cells]
     stb = [mean(data[c]["stub"]) for c in cells]
@@ -68,7 +70,12 @@ def stacked_bar(ax, data, bs):
     x = range(len(cells))
     ax.bar(x, loc, 0.6, color="#4c72b0", label="local RSS")
     ax.bar(x, stb, 0.6, bottom=loc, color="#dd8452", label="remote stub RSS")
-    for i, (l, s, t) in enumerate(zip(loc, stb, tot)):
+    for i, (c, l, s, t) in enumerate(zip(cells, loc, stb, tot)):
+        samples = [a + b + k / 1024.0 for a, b, k
+                   in zip(data[c]["local"], data[c]["stub"], data[c]["skmem"])]
+        mx = max(samples)
+        ax.vlines(i, t, mx, color="#333333", lw=1)
+        ax.plot([i - 0.12, i + 0.12], [mx, mx], color="#333333", lw=1)
         ax.text(i, l / 2, f"{l:,.0f}", ha="center", va="center",
                 fontsize=7, color="white")
         if s > 0:
@@ -83,9 +90,9 @@ def stacked_bar(ax, data, bs):
     return tot
 
 def combined_fig(data, out):
-    """One figure, 4 panels (per bs), stacked absolute RSS bars."""
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4.2), sharey=True)
-    for ax, bs in zip(axes, BS):
+    """One figure, N panels (per bs, BS_PLOT only), stacked absolute RSS bars."""
+    fig, axes = plt.subplots(1, len(BS_PLOT), figsize=(15, 4.2), sharey=True)
+    for ax, bs in zip(axes, BS_PLOT):
         stacked_bar(ax, data, bs)
     axes[0].set_ylabel("kB")
     fig.suptitle("M1 mem: virtio-remote RSS (local bottom + stub top) per bs\n"
@@ -93,13 +100,15 @@ def combined_fig(data, out):
     axes[0].legend(loc="upper right", fontsize=8)
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(out, dpi=150)
+    fig.savefig(out.replace(".png", ".svg"))
     plt.close(fig)
     print("plot ->", out)
 
 def pct_fig(data, out):
-    """One merged chart: % RSS(local+stub) increase over KVM, 8 bars (bs x zc/copy).
-    Stacked: local-increase over KVM (bottom) + stub (top)."""
-    order = [(bs, m) for bs in BS for m in ("z0", "z4m")]
+    """One merged chart: % RSS(local+stub) increase over KVM, 6 bars (3 bs x zc/copy, 2M excluded).
+    Stacked: local-increase over KVM (bottom) + stub (top).
+    Max whisker = max over samples of (local+stub+skmem/1024) pct vs KVM."""
+    order = [(bs, m) for bs in BS_PLOT for m in ("z0", "z4m")]
     fig, ax = plt.subplots(figsize=(9, 4.5))
     for i, (bs, mode) in enumerate(order):
         kv = mean(data["kvm_" + bs]["local"])
@@ -107,8 +116,13 @@ def pct_fig(data, out):
         loc_p = (mean(d["local"]) - kv) / kv * 100
         stb_p = mean(d["stub"]) / kv * 100
         tot_p = loc_p + stb_p
+        samples = [a + b + k / 1024.0 for a, b, k
+                   in zip(d["local"], d["stub"], d["skmem"])]
+        mx_p = max((s - kv) / kv * 100 for s in samples)
         ax.bar(i, loc_p, 0.7, color="#4c72b0", label="local inc. vs KVM" if i == 0 else "")
         ax.bar(i, stb_p, 0.7, bottom=loc_p, color="#dd8452", label="remote stub" if i == 0 else "")
+        ax.vlines(i, tot_p, mx_p, color="#333333", lw=1)
+        ax.plot([i - 0.12, i + 0.12], [mx_p, mx_p], color="#333333", lw=1)
         if loc_p > 3:
             ax.text(i, loc_p / 2, f"{loc_p:.1f}", ha="center", va="center",
                     fontsize=7, color="white")
@@ -127,6 +141,7 @@ def pct_fig(data, out):
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
     fig.savefig(out, dpi=150)
+    fig.savefig(out.replace(".png", ".svg"))
     plt.close(fig)
     print("plot ->", out)
 
