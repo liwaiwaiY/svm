@@ -86,6 +86,7 @@
 \usepackage{subcaption}
 \usepackage{stfloats}
 \usepackage[normalem]{ulem}
+\graphicspath{{src/pic/}{src/svm/text/pic/}{text/pic/}}
 \newtheorem{theorem}{Theorem}
 \newtheorem{definition}{Definition}
 \renewcommand{\qedsymbol}{$\blacksquare$}
@@ -107,8 +108,7 @@
 \author{Yanyan Li$^\dagger$, Zhiqian Xu$^\dagger$, Yawen Wang$^\dagger$, Hai Jiang$^{\dagger*}$, Keqin Li$^\diamondsuit$}
 \affiliation{
     \institution{$^\dagger$Beijing University of Posts and Telecommunications \\
-                 $^\diamondsuit$State University of New York}
-}
+                 $^\diamondsuit$State University of New York} }
 
 %%
 %% By default, the full list of authors will be used in the page
@@ -147,85 +147,113 @@
 \settopmatter{printfolios=true}
 
 \begin{abstract}
-In datacenters, the growing diversity of workloads causes some resources to turn into unallocatable stranded ones. Proactive schedulers and resource disaggregation have been designed to prevent or eliminate such stranding, but unpredictable agentic workloads and the high cost of disaggregation impede their deployment in production. This paper proposes Mosaic, which transparently stitches stranded resources across multiple hosts into an allocatable resource set. Mosaic is designed with a scheduling wrapper and a runtime system. The scheduling wrapper introduces a decomposition module to relax the indivisibility constraint of existing cluster schedulers, and the runtime system intercepts and forwards I/O requests at the para-virtualization emulator, requiring no modifications to either host or guest operating systems. We prototype Mosaic and evaluate it against a local KVM baseline and two kernel-based remote storage protocols (NVMe-oF and iSCSI). Mosaic retains 95\% of the local random-read throughput, converges with the kernel protocols under network RTT, and keeps the memory overhead below 10\%. On a TPCC macro-benchmark, Mosaic slows down by 16--44\% depending on concurrency and remains the fastest remote protocol at low concurrency.
+In datacenters, the growing diversity of workloads causes some resources to turn into unallocatable stranded ones. Proactive schedulers and resource disaggregation have been designed to prevent or eliminate such stranding, but exacting semantic requirements and expensive disaggregated hardware impede their deployment in production. This paper proposes Mosaic, which transparently stitches stranded resources across multiple hosts into an allocatable resource set. Mosaic is an expanded emulator based on para-virtualization. Input/Output requests are intercepted and forwarded in virtualization layer. The design of Mosaic keeps transparency to both host and guest operating systems, which can be seamlessly deployed on existing datacenters. We prototype Mosaic and evaluate it. ....
 \end{abstract}
 \maketitle
 
 \section{Introduction}\label{intro}
-Datacenters have become the foundational infrastructure of digital society, supporting plenty of business~\cite{business1, business2} and computing demands~\cite{ai, cloud, hpc}. Boosting resource utilization of datacenters is a longstanding challenge across research and industry~\cite{mlaas, coach, legoos, feditor, protean}. Unused resources can be classified as unallocated, underutilized, and stranded~\cite{coach} ones. Unallocated resources are intentionally reserved to ensure service-level agreements~\cite{lazy, derm} and for cluster management~\cite{dynamo, mgr}. Underutilized resources are allocated to Virtual Machines (VMs) but not used~\cite{harvestvm, memory}. Stranded resources cannot be allocated since other resources in the same Physical Machine (PM) are fully allocated~\cite{coach, legoos, faasmem}. Solutions for unallocated and underutilized resources are deeply researched and stably deployed~\cite{lazy, derm, harvestvm}. However, resource stranding is still a common issue in datacenters, which has become more severe due to the growing diversity of workloads~\cite{agentcgroup, pond}.
 
-Proactive schedulers~\cite{coach, resourcecentral, protean} and resource dis\-aggrega\-tion~\cite{legoos, pond, fractos} are two effective methods to alleviate resource stranding at the level of cluster scheduling and host operating system, respectively. However, proactive schedulers require resource usage patterns of workloads, while resource disaggregation demands massive hardware and software modifications. Both are difficult to be deployed. Mosaic, proposed in this paper, turns stranded resources into available ones by stitching them into an allocatable resource set in virtualization, as shown in Fig.~\ref{consolidation}. It is a reactive solution for stranded resources with transparency to both host and guest operating systems.
+Datacenters often have sufficient resources in aggregate, yet cannot allocate them to a workload because the resources it needs are fragmented across physical machines (PMs). For example, one PM may have idle CPU cores but no available storage, while another may have spare storage but fully allocated CPUs. Neither machine can satisfy a workload requiring both resources, even though the datacenter has sufficient capacity overall. We refer to such unusable capacity as \emph{stranded resources}~\cite{coach, legoos, faasmem}. Resource stranding has long been a source of inefficient datacenter utilization and is becoming increasingly challenging as workloads become more heterogeneous and their resource demands become more dynamic and stochastic~\cite{agentcgroup, pond}.
 
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.9\linewidth]{src/pic/consolidation.pdf}
-    \caption{Resource stitching.}
-    \label{consolidation}
-\end{figure}
+Resource stranding differs fundamentally from other forms of unused capacity. Unallocated resources are intentionally reserved for service-level objectives and cluster management~\cite{lazy, derm, dynamo, mgr}, while underutilized resources are already allocated to workloads but are not fully consumed~\cite{harvestvm, memory}. Both can be addressed by existing resource-management mechanisms that reclaim or share unused capacity. Stranded resources, in contrast, remain unallocatable because the resources required by a workload do not coexist on the same PM. The fundamental problem is therefore not a lack of resources, but a mismatch between \emph{where resources are available} and \emph{where they can be allocated}.
 
-Mosaic exposes stitched resources through the para-virtualization framework, which natively separates the host and the guest and connects them via virtqueues. This separation lets Mosaic intercept the data path in the emulator and forward device accesses to another machine. We call the machine providing CPU cores the local side, and the machines providing peripherals the remote sides. As shown in Fig.~\ref{overall}, the expanded emulator consists of a local forwarding module and a remote forwarding module. The local module sends guest requests and handles remote responses; the remote module invokes devices and returns the results. To keep the crossing overhead low, Mosaic pipelines the forwarding path, batches small requests, applies zero-copy transmission above an adaptive size threshold, and pools workers so that multiple virtqueues proceed concurrently. An inflight window is further maintained so that outstanding requests hide the network latency.
+Today's datacenters address resource stranding at different layers of the resource-management stack, as shown in Fig.~\ref{mapping}. Proactive schedulers~\cite{coach, resourcecentral, protean} operate at the cluster-scheduling layer: they predict resource usage and place workloads whose demands complement each other, reducing the likelihood of stranded capacity. Resource-disaggregation systems ~\cite{legoos, pond, fractos} instead operate below the scheduler, decoupling resources and their operating-system subsystems so that a workload can access resources distributed across machines. These approaches are effective, but have different deployment barriers. Proactive scheduling depends on workload usage patterns and can be ineffective for workloads with unpredictable resource demands. Disaggregation, in contrast, changes the underlying resource abstraction and often requires substantial operating-system, hardware, or infrastructure modifications.
+
+Mosaic explores a different point in this design space: \emph{rather than predicting stranding or redesigning the underlying resource infrastructure, Mosaic makes stranded resources allocatable by stitching them across machine boundaries at the virtualization layer}. The key observation is that a VM already provides an abstraction of its resources that is decoupled from their physical implementation. Mosaic extends this abstraction so that a VM no longer needs to obtain all of its resources from a single PM. Each resource type can be assembled from resources on multiple machines, and different resource types can be provided by different machines. For example, as illustrated in Fig.~\ref{stitch}, CPU cores stranded on one machine can form a VM's vCPU resource, storage stranded on another can form its vDisk, and an accelerator stranded on a third can form its vASIC. Mosaic exposes these resources together as a single \emph{allocatable resource set} to the VM.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{src/pic/overall.pdf}
-    \caption{The overall architecture of Mosaic.}
-    \label{overall}
+    \includegraphics[width=\linewidth]{stitch}
+    \caption{Mosaic stitches stranded resources across machines into an
+    allocatable resource set for a VM.}
+    \label{stitch}
 \end{figure}
 
-We implement a prototype of Mosaic and evaluate it against a local KVM baseline and two kernel-based remote storage protocols, NVMe-oF and iSCSI. On microbenchmarks, Mosaic retains 95\% and 98\% of the local random-read and random-write throughput once the worker pool has at least two workers; under injected RTT up to 2\,ms, its throughput converges with NVMe-oF and iSCSI to the window/RTT bound, while the memory overhead stays below 10\%. On a TPCC macro-benchmark, Mosaic slows down by 16--44\% depending on concurrency yet remains the fastest remote protocol at low concurrency. On I/O-intensive Spark workloads, it stays within 8--16\% of KVM.
+This abstraction changes the granularity at which resources are allocated. Conventional VM placement implicitly requires a resource bundle to be satisfied by one PM. Mosaic instead allows the bundle to be composed across PMs: a VM can consume CPU, memory, storage, network, or accelerator resources wherever they are available, without requiring these resources to be colocated. As a result, Mosaic can utilize capacity that would otherwise remain stranded while preserving the resource abstraction seen by the VM. The guest operating system and applications do not need to know where an individual resource is physically located, and the host operating system does not need to understand the VM's cross-host resource composition. Mosaic therefore requires neither application semantics nor workload usage prediction, and can be deployed without modifying existing host and guest operating systems.
+
+The virtualization layer, however, was not designed for resources that span machine boundaries. Once a VM's resources are distributed across machines, the virtualization layer must provide the same virtual resource interface while transparently crossing the host boundary. For I/O resources, a request issued by the guest to a virtual device may have to reach a physical device on a remote PM. This introduces network latency, data movement, synchronization, and buffer-management overheads that do not exist for local devices. A naive implementation can therefore recover stranded resources at the cost of making remote access a new performance bottleneck.
+
+Mosaic addresses this challenge by leveraging the isolation boundary already provided by para-virtualization. A conventional virtio device separates the guest-visible device from its physical backend through a virtqueue, providing a natural boundary between the VM and device implementation. Mosaic extends this boundary across machines. A local Mosaic forwarding module consumes requests from the guest virtqueue and forwards them to a remote Mosaic module, which invokes the physical device and returns the result. The guest continues to access the resource through the existing virtual-device interface without knowing whether its backend is local or remote.
+
+Mosaic further optimizes this cross-host path to reduce the cost of remote access. It pipelines request processing to overlap forwarding and device execution, batches small requests to amortize per-request overhead, and uses zero-copy transmission above an adaptive size threshold to reduce data movement. A worker pool allows multiple virtqueues to progress concurrently, while an inflight window keeps sufficient requests outstanding to hide network latency. Together, these mechanisms allow Mosaic to expose remote resources through the existing virtualization abstraction while controlling the overhead of cross-host access.
+
+We implement a prototype of Mosaic and evaluate it against a local KVM baseline and two kernel-based remote-storage protocols, NVMe-oF and iSCSI. On microbenchmarks, Mosaic retains 95\% and 98\% of local random-read and random-write throughput, respectively, with four workers. Under injected RTTs of up to 2\,ms, its throughput approaches the window/RTT bound of the forwarding path; in the tested block-size range, zero-copy memory overhead remains below 8\%. On the TPC-C macrobenchmark, Mosaic incurs a 16--44\% slowdown depending on concurrency, while remaining the fastest evaluated remote protocol at low concurrency. On I/O-intensive Spark workloads, Mosaic remains within 8--16\% of local KVM. These results demonstrate that virtualization-layer resource stitching can recover otherwise stranded resources with practical performance overhead.
 
 This paper makes the following contributions:
 \begin{enumerate}
-    \item Mosaic, a virtualization-layer resource stitching abstraction that allows cross-host resource usage, is proposed to turn stranded resources into allocatable ones.
-    \item A cross-host forwarding architecture, based on para-virtualization framework, is designed, supporting pipe\-lined request processing.
-    \item A low-overhead prototype of Mosaic is implemented and evaluated\footnote{anonymous code link}.
+    \item We present \textbf{Mosaic}, a virtualization-layer resource stitching abstraction that composes fragmented resources across physical machines into an allocatable resource set for a VM, allowing different resource types to reside on different machines.
+
+    \item We design a \textbf{cross-host virtualization architecture} that realizes this abstraction through the para-virtualization interface, with pipelined request processing, adaptive zero-copy transmission, request batching, concurrent virtqueue processing, and latency hiding through an inflight window.
+
+    \item We implement and evaluate a \textbf{prototype of Mosaic}, demonstrating that cross-host resource stitching can recover stranded capacity with low overhead across microbenchmarks and representative I/O-intensive applications.\footnote{Anonymous code link.}
 \end{enumerate}
 
-This paper is structured as follows. Section~\ref{analysis} architecturally analyzes stranded resources. Section~\ref{runtimesystem} details the design of Mosaic. Section~\ref{eval} presents the evaluation results. Section~\ref{relatedwork} discusses related work, and Section~\ref{conclu} concludes.
+The rest of this paper is organized as follows. Section~\ref{analysis} analyzes resource stranding across different layers of datacenter resource management. Section~\ref{runtimesystem} presents the design and implementation of Mosaic. Section~\ref{eval} evaluates its performance and overhead. Section~\ref{relatedwork} discusses related work, and Section~\ref{conclu} concludes.
 
 \section{Analysis}\label{analysis}
-\subsection{Stranded Resources in Different Managers}
-Resource management in datacenters is completed via the coordination among the cluster scheduler, the host OS, and the emulator, as shown in Fig.~\ref{mapping}. The cluster scheduler assigns work nodes to VMs based on its scheduling objective, which is related to the states of Physical Machines (PMs) and VMs' resource demands. Each host OS manages fine-grained allocations on its PM. The emulator emulates virtual resources for the guest OS, with various dataplane acceleration mechanisms. Since emulators can only emulate allocated hardware, researchers have tried to solve the resource stranding issue in the cluster scheduler (i.e., proactive schedulers~\cite{autopilot, audible, proactive}) or the host OS (i.e., resource disaggregation~\cite{fractos, legoos, clio, pond}).
+
+\subsection{Where Resource Stranding Comes From}
+
+Resource allocation in a conventional datacenter is coordinated across three layers: the cluster scheduler, the host operating system, and the VM emulator, as illustrated in Fig.~\ref{mapping}. Each layer exposes a different abstraction of resources. The cluster scheduler reasons about VM-level resource demands and PM-level capacity. The host OS manages fine-grained allocation of physical resources through resource-specific subsystems. The emulator finally exposes the allocated resources as virtual devices and processors to the guest OS. Consequently, resource stranding can arise whenever a resource is available at one layer but cannot be incorporated into the resource bundle required at that layer.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{src/pic/mapping.pdf}
-    \caption{Resource management in datacenters.}
+    \includegraphics[width=0.9\linewidth]{mapping}
+    \caption{Resource management in datacenters. Resource stranding
+    emerges from resource coupling at different management layers.}
     \label{mapping}
 \end{figure}
 
-The cluster scheduler traces the resource states of all PMs and schedules VM requests. The resource utilization of VMs and PMs can be modeled as time-series curves. A PM is excluded from the placement of a VM if the superposition of their utilization curves exceeds the allocation threshold. When a PM cannot satisfy any pending VM request, its remaining unallocated hardware goes unused and becomes stranded. To mitigate this, proactive schedulers group VMs with complementary resource demands into a single scheduling unit, smoothing out dynamic utilization fluctuations. By aligning the resource ratio of a unit with PM provisioning, resources are fully allocated simultaneously. However, as stated above, emerging unpredictable workloads lack stable statistical patterns, making curve abstraction impossible and rendering these proactive schedulers ineffective.
+\textbf{Cluster scheduler.} The cluster scheduler places VMs onto PMs according to resource capacity and scheduling objectives. A PM is eligible for a VM only when it can satisfy the VM's resource requirements simultaneously. For dynamic workloads, the scheduler may represent resource demand using time-varying utilization curves. If the combined demand of existing VMs and a pending VM exceeds the available capacity of any resource, the PM is excluded from placement. Resources that remain available on that PM cannot be allocated independently because the VM's resource requirements must be satisfied as a bundle. These resources therefore become stranded.
 
-The host OS manages multiple types of hardware through different subsystems. Hardware availability can be viewed through the lens of these subsystems: when a resource is fully allocated, its corresponding subsystem rejects further requests, and a PM is excluded if a required subsystem rejects the VM's requests. When a PM cannot satisfy any pending VM request, resources whose subsystems still have capacity become stranded. Resource disaggregation disseminates resources and their OS subsystems to distributed PMs by decoupling hardware: although available resources are spread across multiple machines, their subsystems can be grouped to serve one VM, and since the usages of different resources are independent, stranding is essentially eliminated. On existing blade servers, disaggregation connects stranded resources by adding glue logic in the OS kernel; however, practical deployment is difficult because it requires intrusive kernel modifications and hardware-specific blade specifications.
+Proactive schedulers~\cite{autopilot, audible, proactive, coach, resourcecentral, protean} reduce this coupling by predicting resource usage and placing VMs with complementary demand patterns together. As illustrated in Fig.~\ref{mapping}, multiple VMs can be treated as a scheduling unit whose combined utilization is better aligned with the resource proportions of a PM. This approach can substantially reduce fragmentation when workload demand is predictable. However, it inherently relies on knowledge of resource usage patterns. Emerging workloads with bursty or stochastic resource demands make such prediction increasingly difficult, limiting the effectiveness of proactive placement.
+
+\textbf{Host operating system.} The host OS introduces another form of resource coupling. Physical resources are managed by separate OS subsystems, each of which maintains its own allocation state and admission decisions. A VM can therefore be rejected by a PM when any required subsystem has insufficient capacity, even though other subsystems on the same PM still have resources available. For example, a PM may have free CPU capacity but reject a VM because its storage subsystem is full. The remaining CPU capacity is then stranded.
+
+Resource-disaggregation systems~\cite{fractos, legoos, clio, pond} address this coupling by separating physical resources and their management subsystems from individual PMs. Resources can be accessed from different machines, allowing a workload to combine capacity that would otherwise be stranded on separate PMs. This approach directly removes the machine-level coupling that causes stranding. However, resource disaggregation moves the problem into the underlying infrastructure: resource ownership, access paths, OS subsystems, and hardware interfaces must all support remote operation. Existing systems consequently require substantial kernel, hardware, or infrastructure changes, which complicates deployment in existing datacenters.
+
+\textbf{Virtualization layer.} The emulator sits above these physical-resource management layers. It normally exposes to the guest only the resources that have already been allocated by the host OS. Consequently, conventional virtualization inherits the resource coupling imposed by the lower layers: a VM can only expose virtual resources backed by resources that the host has successfully allocated.
+
+This observation suggests a different way to address stranding. Instead of changing how the scheduler predicts demand or how the host OS manages physical resources, the virtualization layer can change how a VM's resource set is composed. If a VM does not require all of its resources to be backed by the same PM, resources that are stranded at different PMs can be combined into one VM-level resource set. Mosaic therefore moves the stitching point to the virtualization layer, where the physical location of resources can be hidden from the guest while the resource set exposed to the VM can span multiple PMs.
 
 \subsection{Design Principles}
-Stitching a resource across hosts introduces two requirements beyond conventional VM I/O. First, the remote resource must remain transparent to the guest. Second, the additional cost of crossing the host boundary must be carefully controlled. We therefore follow three principles in designing Mosaic Runtime.
 
-\textbf{P1: Transparency. }Mosaic should preserve the existing VM device abstraction. The guest continues to access a stitched resource through an unmodified interface, without knowing whether the underlying resource is local or remote. Also, the host is not aware of guest requests are forwarded to remote machines.
+Stitching resources across hosts changes the location of a VM's resources without changing the resource abstraction exposed to the guest. This requirement introduces three design challenges for the Mosaic runtime: hiding the physical location of resources, minimizing the cost of crossing host boundaries, and tolerating the latency and concurrency characteristics of remote access. We therefore follow three design principles.
 
-\textbf{P2: Low Crossing Overhead.} A remote I/O request incurs additional network, data-movement, synchronization, and buffer-management costs. Mosaic therefore pipelines request processing and amortizes per-request overhead through batching, while avoiding unnecessary data movement and buffer allocation.
+\textbf{P1: Preserve the Virtual Resource Abstraction.} Mosaic should preserve the resource interface already exposed to the guest. A stitched resource must appear as an ordinary virtual resource, regardless of whether its physical backend is local or remote. The guest OS and applications should require no changes and should not need to distinguish local resources from stitched ones. At the same time, the host OS should continue to manage its physical resources through existing interfaces without being aware of how Mosaic forwards guest requests across machines.
 
-\textbf{P3: Latency Tolerance.} Unlike local VirtIO, remote requests must tolerate network latency. Mosaic maintains sufficient outstanding requests and processes them concurrently so that network communication, remote device processing, and local request handling can overlap.
+\textbf{P2: Minimize Cross-Host Cost.} A local VM request normally traverses only the virtualization boundary, whereas a stitched request additionally incurs network transmission, data movement, synchronization, and buffer-management costs. These costs can dominate the execution time of small I/O requests. Mosaic therefore minimizes per-request overhead by pipelining the forwarding path, batching small requests, and avoiding unnecessary data copies and buffer allocations. In particular, Mosaic uses zero-copy transmission when requests exceed an adaptive size threshold.
+
+\textbf{P3: Hide Remote Latency through Concurrency.} Remote resources inevitably introduce network latency that cannot be eliminated by virtualization-layer optimizations alone. Mosaic should therefore overlap communication, remote resource execution, and local request processing whenever possible. It maintains multiple outstanding requests through an inflight window and uses a worker pool to process multiple virtqueues concurrently, allowing useful work to proceed while individual remote requests are in flight.
 
 \section{Design and Implementation}\label{runtimesystem}
-Based on the three principles, we choose para-virtualization as the base emulation model, since it is the only one that keeps I/O transparent to both sides. To reduce the overhead of crossing the host boundary, Mosaic applies zero-copy transmission, batching, and buffer pooling. For latency tolerance, Mosaic pipelines the forwarding path, pools workers to enable concurrency across virtqueues, and maintains an inflight window so that network latency overlaps with device processing.
+Based on these principles, Mosaic places the cross-host boundary at the para-virtualized device interface. This placement preserves the existing VirtIO contract while allowing the device backend to execute on another host. Mosaic then combines pipelining, bounded concurrency, adaptive batching, zero-copy transmission, and buffer pooling to control the cost of crossing that boundary.
 
 \subsection{Why Para-Virtualization}
-Para-virtualization (Virtio) is the only device-emulation model in the virtualization layer that keeps I/O transparent to both the host and the guest. Fig.~\ref{devicemodel} illustrates the three ways of emulating peripherals: full virtualization, pass-through, and para-virtualization. Full Virtualization (FV) emulates a complete device in software. Pass-Through (PT) exposes physical devices directly to virtual machines. Para-Virtualization (PV) introduces a cooperative interface between the guest and the emulator. Virtio offers a frontend-backend split abstraction: VM applications access devices through guest drivers, while backend drivers in the emulator invoke host drivers to handle I/O requests. This separation is exactly what Mosaic intercepts: by diverting requests at the emulator, the guest-visible device interface and the host-side drivers remain untouched, and the underlying cross-host forwarding is invisible to both operating systems.
+Fig.~\ref{devicemodel} compares three types of device virtualization modes, including full virtualization, device passthrough, and para-virtualization. Full virtualization reproduces a device interface in software, whereas passthrough maps a physical device directly into a VM. VirtIO instead defines a stable frontend--backend contract. The guest driver places requests in virtqueues, and an emulator backend translates them into operations on the host device. This explicit boundary is a natural stitching point. Mosaic relocates the backend side of the contract without changing the guest driver or the host device interface. Neither operating system needs to interpret the cross-host protocol.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.9\linewidth]{src/pic/devicemodel.pdf}
-    \caption{Device models in the QEMU emulator.}
+    \includegraphics[width=0.9\linewidth]{devicemodel}
+    \caption{Mosaic uses the frontend--backend boundary exposed by
+    para-virtualization.}
     \label{devicemodel}
 \end{figure}
 
 \subsection{System Overview}
-Mosaic exploits the separation between VirtIO front-end and back-end drivers to stitch resources across hosts at the virtualization layer. The front-end driver and the back-end driver of a stitched device execute on different machines and are connected through Mosaic's forwarding runtime. We refer to the machine hosting the guest CPU and QEMU as the local side, and the machine hosting the physical resource and its back-end driver as the remote side. From the guest's perspective, the remote resource remains an ordinary VirtIO device; Mosaic hides its physical location below the guest-visible device abstraction.
+Mosaic exploits the separation between VirtIO front-end and back-end drivers to stitch resources across hosts at the virtualization layer. The front-end driver and the back-end driver of a stitched device execute on different machines and are connected through Mosaic's forwarding runtime. We refer to the machine hosting the guest CPU and QEMU as the local side, and the machine hosting the physical resource and its back-end driver as the remote side. From the guest's perspective, the remote resource remains an ordinary VirtIO device. Mosaic hides its physical location below the guest-visible device abstraction.
 
-Figure~X shows the architecture of Mosaic. The expanded emulator consists of a local forwarding module and a remote forwarding module. The local module receives requests from VirtIO queues and forwards them to the remote side, while the remote module receives the requests and submits them to the physical device; device responses follow the reverse path. Since VirtIO devices commonly expose multiple virtqueues to support parallel I/O, Mosaic assigns an independent connection to each virtqueue, avoiding contention between otherwise independent request streams.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{overall}
+    \caption{Mosaic architecture. Each virtqueue is forwarded through an
+    independent connection between the local QEMU and remote stub.}
+    \label{overview}
+\end{figure}
 
-The design realizes the three principles of Section~\ref{analysis}. The existing VirtIO interface provides guest transparency. The forwarding pipeline, together with batching, zero-copy transmission, and buffer pooling, reduces the overhead of crossing the host boundary. Worker pooling and an inflight window maintain sufficient request concurrency to tolerate network latency. The mechanisms are described along the request path in the following sections.
+Figure~\ref{overview} shows the architecture of Mosaic. The expanded emulator consists of a local forwarding module and a remote forwarding module. The local module receives requests from VirtIO queues and forwards them to the remote side, while the remote module receives the requests and submits them to the physical device. Device responses follow the reverse path. Since VirtIO devices commonly expose multiple virtqueues to support parallel I/O, Mosaic assigns an independent connection to each virtqueue, avoiding contention between otherwise independent request streams.
+
+The existing VirtIO interface provides guest transparency. The forwarding pipeline and its batching, zero-copy, and buffer-pooling mechanisms reduce cross-host overhead, while worker pools and an inflight window preserve concurrency in the presence of network latency. We describe these mechanisms along the request path below.
 
 % Using the separation of para-virtualization, Mosaic places front-end driver and back-end driver in different machines, and connects them with two forwarding modules. For clarity, the machine providing CPU cores to run guest is called as local side. All front-end drivers are executed on local side, while back-end drivers of stranded hardware runs on remote sides. Via this connection, stranded resources are stitched as an allocatable resource set. Additionally, Mosaic implements multiple mechanisms to satisfy design principle \textbf{2} and \textbf{3}.
 
@@ -238,49 +266,65 @@ The design realizes the three principles of Section~\ref{analysis}. The existing
 % The remote forwarding module maintains a buffer pool to avoid overhead introduced by heap memory management. Since device submission is mutex, the receiver in remote forwarding batches requests, which arrives before finishing last batch, to continue network transmission, leaving backpressure away from local side.
 
 \subsection{End-to-End Workflow}
-The interaction workflow between the local QEMU and the remote stub is illustrated in Fig.~\ref{workflow}. This architecture expands the native Virtio ring buffer, which is confined to single-machine shared memory, into a cross-machine workflow.
+The interaction workflow between the local side and the remote side is illustrated in Fig.~\ref{workflow}. This architecture expands the native Virtio ring buffer, which is confined to single-machine shared memory, into a cross-machine workflow.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=\linewidth]{src/pic/workflow.pdf}
-    \caption{The detailed workflow of Mosaic runtime.}
+    \includegraphics[width=\linewidth]{workflow}
+    \caption{End-to-end request and completion path through Mosaic.}
     \label{workflow}
 \end{figure}
 
-The virtio frontend driver in the guest sends an I/O request by writing the shared \texttt{vring} buffer of the corresponding \texttt{Virtqueue}, and then invokes a \texttt{kick} operation that issues an MMIO or PIO write, triggering a \texttt{VM\_exit}. The KVM subsystem checks the \texttt{exit\_reason} and notifies the emulator process \textcircled{1}. Since each \texttt{virtqueue} is shared between the guest and the emulator, backend drivers read I/O requests and write responses through the unified \texttt{VirtQueueElement} data structure. Upon sensing the notification, the overridden handler of Mosaic fetches the request as a \texttt{VirtQueueElement} through a framework interface \textcircled{2}. After analyzing the memory layout and other metadata, the local QEMU forwards the request by invoking a router module \textcircled{3}. The router is optimized with zero-copy and asynchronous pipelining to reduce communication overhead.
+The VirtIO frontend driver writes a request into the shared \texttt{vring} and kicks its virtqueue. The MMIO or PIO write triggers a VM exit, after which KVM notifies QEMU \textcircled{1}. To avoid contentions, the emulator read I/O requests and write responses via a unified \texttt{VirtQueueElement} data structure rather than original \texttt{vring}. Mosaic emulator intercepts the KVM notification, fetches the I/O request as a \texttt{VirtQueue\-Ele\-ment} \textcircled{2}, and forwards it with its memory layout \textcircled{3}. Zero-copy transmission and asynchronous pipelining optimize this step.
 
-On the remote side, the stub parses the metadata in the payload and reconstructs the memory layout of the \texttt{VirtQueueElement}, avoiding a single large buffer. It then constructs a pseudo-local request and injects it into the backend driver \textcircled{4}. Unaware of the network translation, the backend driver processes the element and issues standard system calls to the remote host OS to operate the physical hardware \textcircled{5}. Once the physical I/O completes \textcircled{6}, the backend driver writes the resulting data back into the element and triggers a completion callback \textcircled{7}. Receiving this completion, the remote stub transmits the updated payload back to the local QEMU \textcircled{8}.
+On the remote side, the stub parses the protocol and reconstructs the element's scatter--gather layout. It injects this pseudo-local request into the backend \textcircled{4}, which processes the element and issues standard system calls to the remote host OS to operate physical hardware \textcircled{5}. After physical I/O completes \textcircled{6}, the backend updates the element and invokes its completion callback \textcircled{7}. The stub then returns the response to local QEMU \textcircled{8}.
 
-The router module in the local QEMU matches the \texttt{VirtQueueElement} against an ordered ring buffer, injects the response into the corresponding guest physical memory, and emits a completion signal into the local \texttt{virtqueue}. The guest driver is finally kicked through an \texttt{irq} \texttt{ioeventfd} \textcircled{9}.
+The local module identifies the corresponding inflight slot from the response sequence number, copies returned data into the guest buffers, publishes the used descriptor, and notifies the guest \textcircled{9}. The guest therefore observes the same VirtIO completion path as it would for a local backend.
 
 \subsection{Local Forwarding}
-The local forwarding module bridges the guest-facing VirtIO path and the cross-host transport. Its main challenge is to process requests concurrently without introducing additional synchronization and data-movement overhead into QEMU's I/O path.
+The local forwarding module bridges the guest-facing VirtIO path and the cross-host transport. Its thread model separates event detection from request and response processing so that neither a guest kick nor a readable socket performs forwarding work on the dispatching context.
 
-\textbf{SPSC Pipelining and the Inflight Window.} Transactions for request forwarding and response handling are decoupled through a lock-free Single Producer Single Consumer (SPSC) buffer. A notification from the guest wakes a sending handler that retrieves available descriptors from the virtqueue and assembles them into network packages. If a device response is expected, the sender records a slot in the SPSC buffer; otherwise it kicks the guest directly. The response handler polls the socket and, because request flow is not ordered, traverses the sending window in the SPSC buffer to match an arrived response to its slot. Before kicking the guest, the receiver resorts the slots to remove holes. The SPSC buffer acts as an inflight window: Mosaic caps the number of outstanding requests at $I$, bounding memory usage and matching the concurrency that the device and the network can sustain.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{local forwarding}
+    \caption{Thread model of local forwarding. Horizontal lanes denote execution contexts, vertical arrows denote task dispatch, and the TX/RX divider separates the request and response paths.}
+    \label{local-forwarding}
+\end{figure}
 
-\textbf{Worker Pool and Dispatching.} Stages of the forwarding pipeline are dispatched to threads taken from a worker pool. All remote devices of a Mosaic VM share the same pool of $W$ workers. A simple hash mapping assigns each virtqueue to a worker, avoiding idle polling and preventing hash-conflicting virtqueues from contending on the same handler.
+\textbf{Thread Model Overview.} Figure~\ref{local-forwarding} shows one local virtqueue as three execution lanes. The middle dispatcher lane contains the lightweight callbacks for guest-kick and socket events, while the upper and lower lanes represent the send and receive workers selected for that virtqueue. Mosaic maintains $W$ threads in each worker pool, and every worker runs a private \texttt{AioContext}; the figure shows one representative worker from each pool rather than two dedicated threads per queue. The lookup symbols resolve an event to its per-virtqueue context, vertical arrows denote task dispatch, and the loop-back arrows denote a worker returning to its event loop. This separation lets the dispatcher react quickly while the workers perform descriptor access, protocol processing, and data transmission.
 
-\textbf{Batching and Adaptive Zero Copy.} Requests carry payloads of different sizes. For small requests, the fixed cost of transmitting each request dominates the actual data transfer, so Mosaic batches multiple small requests before transmission to amortize the per-request communication overhead. For requests with large payloads, Mosaic uses a zero-copy path to avoid unnecessary data movement, and retains the copy path for small payloads because the setup cost of zero-copy can outweigh its benefit; the threshold (1\,MB in our prototype) is chosen according to the relative cost of copying versus zero-copy setup. Additionally, releasing an SPSC slot requires a double check, since the kernel holds guest pages until the zero-copy completion signal arrives.
+\textbf{Worker Pool and Event Dispatching.} The dispatcher and worker-pool symbols in Fig.~\ref{local-forwarding} implement concurrency across virtqueues without allowing concurrent handlers to consume the same queue. A guest kick is mapped by queue index to one send worker, whereas socket readability is mapped to one receive worker. This stable mapping gives each virtqueue a single send-side producer and a single receive-side consumer, while allowing its TX and RX paths to run in parallel. If a kick arrives while the selected send worker is busy, the dispatcher records a pending drain and the worker replays it before becoming idle; consequently, event coalescing does not lose requests. Only descriptor-pop, used-ring update, and guest-notification operations take the per-virtqueue lock, leaving message construction and socket I/O outside the critical section. Increasing $W$ reduces interference among independent virtqueues without requiring a dedicated thread for each one.
 
-Together, SPSC pipelining, worker pooling, batching, and adaptive zero copy allow the local forwarding path to maintain high request throughput while limiting the additional cost introduced by remote forwarding.
+\textbf{SPSC Pipelining and the Inflight Window.} The \texttt{vring} and SPSC-buffer operations in the upper and lower lanes of Fig.~\ref{local-forwarding} form a pipeline between request transmission and response completion. The send worker drains descriptors from the guest-resident \texttt{vring}, assigns each request a sequence number, and publishes response-bearing elements into the host-resident inflight window before transmission. It can then continue sending without waiting for device completion. The receive worker later parses a response, uses its sequence number to locate the original element, writes returned data into the guest buffers, pushes the used descriptor, and frees the corresponding slot. Because device completions may be out of order, the window head advances only over a contiguous run of cleared slots. The window therefore serves both as lock-free handoff state and as bounded backpressure: it exposes enough outstanding work to hide RTT while preventing unbounded request and buffer accumulation.
+
+\textbf{Batching and Adaptive Zero Copy.} The ``assemble messages'' and ``send msg'' stages in the sending-worker lane select a transmission policy according to payload size. Mosaic combines adjacent small requests in one \texttt{sendmsg} call, amortizing system-call and packetization costs that would otherwise dominate a 4\,KB I/O. A large request instead bypasses the copy batch and is sent individually with Linux \texttt{MSG\_ZEROCOPY}, avoiding an additional copy into kernel socket buffers. Because zero-copy registration and completion have fixed costs, the copy path remains preferable below a configurable threshold, set to 1\,MB in our evaluation. For a zero-copy request, Mosaic retains its metadata and buffers until both the remote response and the kernel completion notification arrive. Batching reduces cost per transmission, whereas the inflight window supplies concurrency; using both addresses different bottlenecks in the local path.
 
 \subsection{Remote Forwarding}
-The remote forwarding module bridges the network-facing request stream and the physical device back-end. Unlike the local side, the remote module must also handle the synchronization and memory-management costs of submitting requests to the physical device.
+The remote forwarding module uses the same dispatcher-plus-two-pools structure, but reverses the direction of work: requests first enter through the receive pool, cross the native device backend, and leave through the send pool. Its thread model must additionally serialize backend invocation for each virtqueue while allowing socket reception and physical I/O to overlap.
 
-\textbf{Pipelining, Worker Pool, and Zero Copy.} Similar to the local side, the receiving and sending handlers on the remote side are decoupled and pipelined. The receiver parses packages and reconstructs virtio-compliant device requests, while the sender forwards device responses. Both handlers are dispatched to workers from a shared worker pool with a simple hash mapping. The remote side does not batch response sending, delivering each response as soon as the device finishes processing it. Zero-copy transmission is used on the response path as well.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{remote forwarding}
+    \caption{Thread model of remote forwarding. The receive worker parses and queues requests for the backend; device completions publish responses for the send worker.}
+    \label{remote-forwarding}
+\end{figure}
 
-\textbf{Queueing and Batched Device Submission.} Although asynchronous backends allow multiple requests to be processed concurrently, submitting a request to the device takes a submission lock, so submission itself is serialized. Directly submitting each arriving request would expose this serialization to the network-facing path and bound the device concurrency by the arrival rate. Mosaic therefore maintains a submission queue with a limit $Q$ in the remote stub: requests that arrive while a previous submission is in progress are accumulated and submitted together when the current submission completes. $Q$ bounds the number of requests that can be concurrently in flight at the device, decoupling network reception from device submission, while batching the accumulated requests amortizes the submission-lock cost.
+\textbf{Thread Model Overview.} Figure~\ref{remote-forwarding} uses the same three-lane model as Fig.~\ref{local-forwarding}: the middle lane dispatches socket events, the lower receive-worker lane handles requests arriving from local QEMU, and the upper send-worker lane returns device responses. A readable connection is first resolved to its backend virtqueue and then mapped to one worker in each pool. Request parsing, backend invocation, and response transmission consequently execute outside the dispatcher, while the fixed mapping preserves per-queue ownership.
 
-\textbf{Buffer Pool and Coalescing.} Mosaic maintains a buffer pool for request and response buffers. Without pooling, every forwarded request would trigger heap allocation and reclamation on the remote fast path; reusing preallocated buffers avoids this repeated memory-management overhead and provides stable buffer availability under high request rates. For requests whose payload is scattered across multiple guest pages, Mosaic optionally coalesces the segments into a single contiguous buffer, enabling one large device I/O and a single response iovec; this removes the heap churn of large-block forwarding and improves latency for blocks of 256\,KB and above.
+\textbf{Worker Pool and Event Dispatching.} The ``poll socket,'' ``search vq,'' and ``acquire workers'' stages in Fig.~\ref{remote-forwarding} form a pure event-distribution path. For request data, the dispatcher schedules \texttt{stub\_handle\_task} on the mapped receive worker; for a zero-copy completion event, it schedules \texttt{stub\_send\_task} on the mapped send worker. The dispatcher does not parse protocol messages or invoke the device, so a slow backend cannot block detection of events from other virtqueues. Multiple queues may share a worker, reducing thread count, and after each task the worker rescans its registered queues. Queued requests on an idle backend and unsent published responses are dispatched again during this rescan, ensuring that coalesced or overwritten wakeups do not strand work.
 
-The response path follows the reverse direction. After the physical device completes a request, Mosaic places the completion into the corresponding response path and forwards it through the per-virtqueue connection to the local side. The local forwarding module then completes the corresponding VirtIO descriptor and returns control to QEMU.
+\textbf{Queueing and Batched Device Invocation.} The ``deparse protocol,'' ``insert queue,'' and ``invoke device'' stages in the lower lane decouple network reception from physical I/O. The receive worker incrementally parses the TCP stream, reconstructs the request's scatter--gather buffers, and appends the request to the per-virtqueue queue. When the backend is idle, the same worker invokes the unmodified \texttt{handle\_output} callback, through which the backend pops all currently available reconstructed elements and starts physical I/O. Requests arriving while an asynchronous batch is executing remain queued and automatically form the next batch after its final completion. This design avoids concurrent invocations of one backend queue, amortizes its submission overhead, and overlaps reception of the next batch with execution of the current one. A configurable cap $Q$ pauses further parsing when too much work is waiting, propagating bounded backpressure instead of allowing the remote queue to grow indefinitely.
+
+\textbf{Pipelined Response Transmission and Zero Copy.} The response handoff from ``conduct I/O'' to the upper lane separates asynchronous device completion from socket transmission. The native backend completes an element through \texttt{virtqueue\_push}; Mosaic converts it into a response object, publishes it into a per-virtqueue response window, and schedules the send worker. The worker groups consecutive small responses subject to count and byte limits, whereas large responses are sent individually with \texttt{MSG\_ZEROCOPY}. A device-completion thread normally performs only this bounded handoff rather than socket I/O itself; if the response window becomes full, it supplies backpressure until the sender releases entries. Response batching amortizes transmission overhead, while zero copy avoids adding another full-payload copy for large results.
+
+\textbf{Buffer Pool and Coalescing.} Buffer management occurs while the receive worker reconstructs the ``messages'' shown between protocol parsing and queue insertion in Fig.~\ref{remote-forwarding}. Reallocating every scatter--gather segment for every request would put general-purpose allocator overhead directly on this path, so the remote stub uses a size-classed pool and returns buffers after the response is transmitted. It can also coalesce sufficiently large input regions into one allocation, reducing both allocation count and scatter--gather bookkeeping. Pooling does not eliminate the buffers required by remote I/O, but makes their management predictable and reduces large-request latency; Section~\ref{eval} shows that the benefit becomes visible at 256\,KB and above.
 
 \subsection{Implementation Summary}
-We implement the Mosaic runtime system by extending QEMU's virtio with around 4K lines of code. It requires zero modifications to the guest OS drivers, the native device backend logic, and the KVM hardware acceleration path. We first hook the control plane by registering QOM properties on the \texttt{VirtioDeviceClass}; the setters for these properties dynamically override the native call-back functions of the \texttt{ioeventfd} handlers to process Mosaic transactions. For data-plane interception, a \texttt{remote\_ctx} pointer is injected into the core structure \texttt{VirtQueue}. Eight interfaces of the virtio framework are modified, seamlessly diverting local I/O processing to remote handlers. To minimize Mosaic's interference with other local devices, all related threads are registered as QEMU aio iothreads, so Mosaic's execution never blocks other transactions in the main loop. On the remote side, we leverage an extremely trimmed machine type \texttt{x-remote-machine} that contains only a PCI bus to plug stranded hardware pieces.
+We implement Mosaic in QEMU with approximately 4.6K lines in the forwarding module plus small hooks in the VirtIO core. Two QOM properties, \texttt{remote-machine} and \texttt{remote-stub}, select the local and remote roles. A per-queue context added to \texttt{VirtQueue} carries the connection, parser, inflight-window, and dispatch state, allowing existing VirtIO queue operations to redirect work to Mosaic. The guest driver, native device backend, host device driver, and KVM acceleration path remain unchanged. Forwarding executes in QEMU AIO worker contexts rather than the main loop. The remote endpoint uses QEMU's minimal \texttt{x-remote-machine}, whose PCI bus hosts the backend device without creating a second guest.
 
 
 \section{Evaluation}\label{eval}
-This section presents the performance evaluation of Mosaic scheduling wrapper and runtime system, using micro- and macro-benchmarks. We ran all experiments on a machine with Intel Core i5-13600 K CPU (5.10 GHz) with 32 GB memory and 500 GB NVMe SSD. Network latencies are deterministically injected by Linux traffic control.
+This section presents the performance evaluation of Mosaic, using micro- and macro-benchmarks. We ran all experiments on a machine with Intel Core i5-13600 K CPU (5.10 GHz) with 32 GB memory and 500 GB NVMe SSD. Network latencies are deterministically injected by Linux traffic control.
 
 \subsection{Experimental Setup}
 The Mosaic runtime is evaluated with a 4-vCPU guest and a remote NVMe device exposed through four virtqueues. All I/O accesses the raw physical device with O\_DIRECT, and host page caches are dropped before each run to exclude caching effects. Because the underlying NVMe exhibits run-to-run bandwidth variance of up to $\pm$55\%, we always run comparisons back-to-back, anchor each configuration with a host-level direct-I/O measurement, and report medians of three runs. Mosaic is compared against three baselines: native KVM with a local virtio-blk device, NVMe-oF over TCP, and iSCSI, the latter two serving the same physical device through kernel initiator stacks.
@@ -291,47 +335,114 @@ Microbenchmarks use fio 3.41 with libaio, O\_DIRECT, and 60-second steady-state 
 
 \textbf{Throughput versus the local baseline.} We first run four 4\,KB workloads (random read, random write, sequential read, sequential write) at depth 16 with four jobs, varying only the worker-pool size $W$; the KVM baseline serves the same device locally. With $W{=}1$, all four workloads degrade substantially: a single worker serializes the four virtqueues, and random read drops to 153.7K IOPS (77\% of the 199.0K baseline), random write to 40.3K (42\% of 96.0K), sequential read to 89.0K (40\% of 220.0K), and sequential write to 67.8K (56\% of 122.0K). Increasing $W$ to 2 already restores most performance: random read and random write reach 175.9K and 73.5K IOPS, sequential read 135.9K, and sequential write 87.0K. At $W{=}4$, random read and random write reach 189.5K and 94.2K, i.e., 95\% and 98\% of the local baseline, and sequential write 96.6K (79\%); the three random-friendly workloads are statistically within the run-to-run variance of the baseline. Sequential read is the only workload that retains a real loss of 148.3K versus 220K IOPS ($-$33\%) even at $W{=}4$: its latency is dominated by the per-byte transfer cost of the remote path, which does not amortize with concurrency. Random write is the only workload that improves monotonically with $W$ (40.3$\rightarrow$73.5$\rightarrow$94.2K), reflecting the increasing parallelism of device submission.
 
-% ===== FIGURE PLACEHOLDER: m2g_grouped_iops.svg (IOPS by workload, W=1/2/4 vs KVM) =====
+\begin{figure*}[tbp]
+    \centering
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{m2g_grouped_iops 1}
+        \caption{Throughput.}
+        \label{m2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{m6_iodepth_curves 1}
+        \caption{Inflight.}
+        \label{m6}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{m3_rtt_iops 1}
+        \caption{RTT.}
+        \label{m3}
+    \end{subfigure}
+    \caption{Microbenchmark throughput as worker count, remote queue
+    capacity, and network RTT vary.}
+    \label{micro-throughput}
+\end{figure*}
 
-\textbf{Device concurrency and the inflight window.} Mosaic bounds the number of requests submitted to the physical device with a queue limit $Q$ in the remote stub. We sweep $Q \in \{1,16,32,64\}$ for guest depths of 1, 16, 32, and 64 under 4\,KB random read. At depth 1, all settings deliver the identical 5.5K IOPS (the 178--180\,$\mu$s serial baseline). With $Q{=}1$, the stub issues strictly one asynchronous I/O at a time and throughput is capped at 7.0--7.2K regardless of depth, since all requests serialize on the 140\,$\mu$s device latency. Raising $Q$ to 16 unlocks device parallelism and yields a 10$\times$ jump to 55.6K (depth 16), rising to 66.7K and 71.2K at depths 32 and 64. $Q{=}32$ behaves like $Q{=}16$ (55.4/77.0/82.8K). The inflight window $I$ provides additional queueing slack that hides RTT: keeping $Q{=}64$ and guest depth 64, enlarging the window from 64 to 128 raises throughput from 65.9K to 92.2K IOPS ($+$40\%), reaching 91\% of the KVM baseline (101.4K); without this slack the window is exactly full and every network round trip is exposed. The effective throughput is thus bounded by the weakest of device concurrency $\min(\mathrm{inflight},Q)$ and protocol concurrency $\min(\mathrm{inflight},I)$: $Q$ controls how much parallelism reaches the device, while $I$ controls how much queueing slack hides network latency.
+\textbf{Remote queueing and device concurrency.} Mosaic bounds pending work at the remote stub with a queue limit $Q$. We sweep $Q \in \{1,16,32,64\}$ for guest depths of 1, 16, 32, and 64 under 4\,KB random reads. At depth 1, every setting delivers 5.5K IOPS because no queue can create concurrency that the guest does not supply. With $Q{=}1$, throughput remains at 7.0--7.2K IOPS as depth increases. Raising $Q$ to 16 unlocks device parallelism, producing 55.6K, 66.7K, and 71.2K IOPS at depths 16, 32, and 64. At depth 64, $Q{=}32$ reaches 82.8K IOPS and $Q{=}64$ reaches 92.2K, or 91\% of the 101.4K KVM baseline. Thus, guest depth supplies work, whereas $Q$ determines how much of it can accumulate for adaptive backend batching.
 
-% ===== FIGURE PLACEHOLDER: m6_iodepth_curves.svg (IOPS vs depth, per Q) =====
+\textbf{Latency tolerance under network RTT.} We inject delays corresponding to RTTs of 0.1--2\,ms on the loopback interface and run a 70/30 read/write mix at depth 32. At 0.1\,ms, Mosaic with $I{=}32$ sustains 53.5K IOPS, compared with 61.4K for NVMe-oF, 48.2K for iSCSI, and 65.1K for local KVM. At 2\,ms, Mosaic, NVMe-oF, and iSCSI converge to 14.1K, 15.1K, and 13.8K IOPS, respectively, close to the $32/2\,\mathrm{ms}=16$K window/RTT ceiling. Reducing Mosaic's window from 32 to 16 lowers throughput from 29.2K to 5.8K IOPS across the two endpoint RTTs (versus 53.5K and 14.1K with $I{=}32$). The window is therefore a first-order control on latency hiding: it limits concurrency at low RTT and the number of requests available to cover a long RTT.
 
-\textbf{Latency tolerance under network RTT.} We inject one-way delays between 0 and 950\,$\mu$s (RTT 0.1--2\,ms) on the loopback interface and run a 70/30 read/write mix at depth 32 for window sizes 16 and 32, and for the two kernel protocols. At RTT 0.1\,ms, Mosaic with window 32 sustains 53.5K IOPS, on par with NVMe-oF (48.2K) and 82\% of KVM (65.1K); iSCSI reaches 61.4K. As RTT grows, all remote protocols converge to the same throughput curve governed by window/RTT: at 2\,ms, Mosaic, NVMe-oF, and iSCSI deliver 14.1K, 15.1K, and 13.8K IOPS respectively, close to the theoretical bound of 32 requests / 2\,ms $=16$K (efficiency 88--94\%). A 20$\times$ RTT increase therefore costs only 3.2--4.4$\times$ throughput, entirely explained by the Little's-law bound; the local KVM baseline stays flat at 65.1K since it never crosses the network. Halving the window halves throughput across the entire RTT range (ratio 0.40--0.54, e.g., 29.2K vs.\ 53.5K at 0.1\,ms and 5.8K vs.\ 14.1K at 2\,ms), confirming that the inflight window is the first-order bottleneck of the forwarding path: it limits concurrency at low RTT and outstanding requests at high RTT.
+\textbf{Memory overhead.} We sample the local and remote process footprints with one request in flight at block sizes of 64\,KB, 512\,KB, and 1\,MB. Relative to the corresponding KVM processes, Mosaic's total overhead with zero copy is 7.3\%, 6.8\%, and 5.1\%; the copy path uses 10.4\%, 9.0\%, and 7.8\%. Across these sizes, the remote component accounts for a stable 4.0--4.4 percentage points. Zero copy therefore reduces local memory overhead in this configuration, but does not eliminate the buffers required to track an in-flight request.
 
-% ===== FIGURE PLACEHOLDER: m3_rtt_iops.svg (IOPS vs RTT, 4 curves) =====
-
-\textbf{Memory overhead.} We measure the memory footprint with a single in-flight request to isolate steady state, for block sizes of 64K, 512K, 1M, and 2M. Mosaic adds only 1--6\% RSS to the local emulator over the corresponding KVM guest (e.g., 5--9\% total at the peak), and the remote stub maintains a constant 34--48\,MB across all sizes; zero-copy kernel buffers (skmem) remain at the kilobyte level. The overhead is independent of request size and does not grow with concurrency. Interestingly, the zero-copy path is not more memory-intensive than the copy path at low concurrency, since both must hold the same number of in-flight buffers; the benefit of zero copy appears only by eliminating per-request data movement, not by reducing buffering.
-
-% ===== FIGURE PLACEHOLDER: m1mem_bar_all.svg (memory by bs, local/stub/KVM) =====
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{m1mem_pct_kvm 1}
+        \caption{Memory overhead.}
+        \label{memory-overhead}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{m5_ratio_diff 1}
+        \caption{Buffer-pool benefit.}
+        \label{buffer-pool}
+    \end{subfigure}
+    \caption{Memory cost of zero copy and latency benefit of buffer reuse.}
+    \label{memory-buffer}
+\end{figure}
 
 \textbf{Large requests and buffer pooling.} For large blocks, where per-byte cost dominates, we run a synchronous workload at block sizes from 16K to 2M. KVM's per-request latency grows 4.5$\times$ (19.8 to 88.5\,$\mu$s), while Mosaic without buffer pooling grows 16.8$\times$ (48.7 to 818\,$\mu$s) and with buffer pooling 13.5$\times$ (49.8 to 671\,$\mu$s): the remote path multiplies the disk-intrinsic cost by data movement, transfer, and submission overhead. The bandwidth ratio of Mosaic to KVM therefore shrinks from 40\% at 16K to 13\% at 2M. Buffer pooling recovers most of this loss: at 256K, 1M, and 2M it reduces latency by 10\%, 26\%, and 18\% respectively (172.3$\rightarrow$154.5, 506.1$\rightarrow$375.6, 818.0$\rightarrow$671.3\,$\mu$s), while at 64K and below the difference is within noise. Reusing preallocated buffers avoids the heap churn (per-request allocation and reclamation) that dominates large-block forwarding; requests below 256K are too short for this overhead to matter.
 
-% ===== FIGURE PLACEHOLDER: m5_pdiff.svg (P=on benefit vs bs) =====
 
 \subsection{Macrobenchmarks}
 We evaluate a sysbench TPCC workload (20-second warm-up followed by 60-second measurement, page caches dropped per run) with 1, 2, and 4 client threads; the guest data disk is served through each protocol in turn, back-to-back on the same day.
 
-% ===== FIGURE PLACEHOLDER: macro_txn_abs.svg (txns/s by threads, 4 protocols) =====
 
 At one thread, Mosaic achieves 185.6 txns/s, 23\% below the KVM baseline (240.0) but higher than NVMe-oF (158.3) and iSCSI (109.3): with little concurrency the fixed per-transaction overhead dominates, and Mosaic's lightweight virtio forwarding is cheaper than the kernel protocol stacks. At two threads all protocols scale (Mosaic 252.2, NVMe-oF 221.5, iSCSI 171.6 vs.\ KVM 298.7), and Mosaic remains the fastest remote path. As concurrency grows, the inflight window becomes the bottleneck: at four threads Mosaic delivers 248.5 txns/s ($-$44\% vs.\ KVM 446.3), comparable to iSCSI (249.5) and slightly below NVMe-oF (273.8), and all three remote paths plateau because the guest-side window caps the outstanding transactions.
 
-% ===== FIGURE PLACEHOLDER: macro_p95_abs.svg (p95 by threads, 4 protocols) =====
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{macro_p95_abs 1}
+        \caption{P95 latency.}
+        \label{tpcc-p95}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{macro_txn_abs 1}
+        \caption{Transaction throughput.}
+        \label{tpcc-txn}
+    \end{subfigure}
+    \caption{TPC-C performance as client concurrency increases.}
+    \label{tpcc-results}
+\end{figure}
 
-Tail latency degrades more than throughput. Mosaic's p95 transaction latency rises from 10.65\,ms at one thread (+31\% vs.\ KVM's 8.13\,ms) to 44.17\,ms at four threads (+113\% vs.\ 20.74\,ms), while its average latency grows from 5.39\,ms (+29\%) to 16.09\,ms (+80\%). NVMe-oF shows p95 of 13.22/20.74/37.56\,ms and iSCSI 30.26/38.94/45.79\,ms across the three thread counts; iSCSI's p95 reaches 3.7$\times$ KVM at one thread. The degradation ranking of tail latency (Mosaic $<$ NVMe-oF $<$ iSCSI at low concurrency) mirrors the ranking of fixed per-transaction cost, confirming that the p95 inflation comes from the same forwarding path.
+Tail latency degrades more than throughput. Mosaic's p95 transaction latency rises from 10.65\,ms at one thread (+31\% versus KVM's 8.13\,ms) to 44.17\,ms at four threads (+113\% versus 20.74\,ms), while average latency grows from 5.39 to 16.09\,ms. NVMe-oF's p95 rises from 13.22 to 37.56\,ms (20.74\,ms at two threads), and iSCSI's rises from 30.26 to 45.79\,ms (38.94\,ms at two). At low concurrency, Mosaic therefore has the lowest tail latency among the remote paths. At four threads, however, its bounded window causes a sharper increase and places it between NVMe-oF and iSCSI.
 
 \subsection{End-to-End Applications}
 We run three data-intensive applications on the data disk: PageRank on a 1M-page Wikipedia graph (10 iterations), ALS matrix factorization over a movie-rating dataset (20 training iterations), and XGBoost over a 6M-row synthetic dataset (16 rounds). For ALS and XGBoost we force each iteration to re-read the dataset from the data disk and drop the page cache, keeping I/O on the critical path; the workloads run with 1, 2, and 4 Spark cores.
 
-% ===== FIGURE PLACEHOLDER: app_pagerank_cores.svg (PageRank total time by cores) =====
+\begin{figure*}[tbp]
+    \centering
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{app_pagerank_cores 1}
+        \caption{PageRank.}
+        \label{app-pagerank}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{app_als_cores 2}
+        \caption{ALS.}
+        \label{app-als}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.3\textwidth}
+        \includegraphics[width=0.9\linewidth]{app_xgb_cores 1}
+        \caption{XGBoost.}
+        \label{app-xgboost}
+    \end{subfigure}
+    \caption{End-to-end application runtime with 1, 2, and 4 Spark cores.}
+    \label{application-results}
+\end{figure*}
 
-With a 150\,$\mu$s RTT, PageRank shows no protocol difference: total times at 1/2/4 cores are 39.2/24.9/21.7\,s (Mosaic), 39.6/27.3/23.0\,s (KVM), 38.2/24.3/20.9\,s (NVMe-oF), and 38.3/24.6/21.1\,s (iSCSI). Computation dominates and I/O never becomes the bottleneck, so the 150\,$\mu$s RTT is fully hidden.
+With a 150\,$\mu$s RTT, PageRank shows little protocol sensitivity: total times at 1/2/4 cores are 39.2/24.9/21.7\,s for Mosaic, 38.2/24.2/20.9\,s for KVM, 38.3/24.6/21.1\,s for NVMe-oF, and 39.6/27.3/23.0\,s for iSCSI. Computation dominates this workload, hiding most of the storage-path difference.
 
-% ===== FIGURE PLACEHOLDER: app_als_cores.svg (ALS total, stacked build+train) =====
-
-When I/O is forced back into the critical path, the protocols separate. For ALS, Mosaic stays within 8.0--13.8\% of KVM across core counts (79.7/69.7/65.8\,s vs.\ 73.8/62.1/57.8\,s), and its four-core build phase is actually the fastest among all protocols (9.4\,s), because four parallel readers saturate the remote disk; the loss concentrates in the serial training phase, which re-reads the dataset from disk each iteration. For XGBoost, Mosaic loses 8.4--15.9\% (60.0/57.7/57.2\,s vs.\ 55.4/50.6/49.4\,s), with the gap again concentrated in the rescan-driven training.
-
-% ===== FIGURE PLACEHOLDER: app_xgb_cores.svg (xgb total, stacked build+train) =====
+When I/O is forced back into the critical path, the protocols separate. For ALS, Mosaic is 8.0--13.8\% slower than KVM across core counts (79.7/69.7/65.8\,s versus 73.8/62.1/57.8\,s). Its build phase scales from 30.3\,s at one core to 15.3\,s at two cores, but rises to 18.4\,s at four; the training phase remains 47.4--54.4\,s because every iteration re-reads the dataset. For XGBoost, Mosaic is 8.4--15.9\% slower (60.0/57.7/57.2\,s versus 55.4/50.6/49.4\,s), with the gap again concentrated in rescan-driven training.
 
 iSCSI is the worst in both: 75--150\% slower, because its single-queue backend saturates under parallel re-reads. These results confirm that, once device parallelism is unlocked, Mosaic's forwarding overhead remains small relative to kernel remote-storage protocols even for I/O-intensive applications, and that its remaining loss scales with the volume of data crossing the remote path rather than with core count.
 
@@ -350,9 +461,9 @@ Mosaic takes a complementary software-based approach. Remote devices remain atta
 Resource disaggregation also exists purely in software, especially for storage and memory. Kernel protocols such as NVMe-oF~\cite{nvmeof} and iSCSI~\cite{iscsi} assign stranded storage by encapsulating raw I/O commands into network protocols, and are widely deployed. For memory, RDMA-based swapping, e.g., InfiniSwap~\cite{infiniswap} and FastSwap~\cite{fastswap}, uses remote memory as a swap region, while AIFM~\cite{aifm} adds aggressive prefetching and program analysis to reduce swap traffic. LegoOS~\cite{legoos} goes further with a split-kernel design that disseminates computing, memory, and storage across distributed machines and allocates each resource on demand. These systems share a common cost: they either change the guest-visible interface or require modifications to the OS kernel. Mosaic instead reuses the unmodified VirtIO stack and the host-side device drivers: it forwards I/O at the emulator, leaving both the guest and the host untouched, at the price of the forwarding overhead quantified in Section~\ref{eval}.
 
 \section{Discussion and Conclusion}\label{conclu}
-\noindent\textbf{Discussion.} Mosaic relies on the standardized frontend-backend separation of the virtio ecosystem. While virtio has become the de facto standard for mainstream datacenter I/O~\cite{virtio}, its penetration into specialized hardware remains uneven. Specifically, for emerging AI accelerators~\cite{nvidia, google, ascend}, hardware vendors are highly incentivized by commercial interests to maintain vertically integrated software stacks rather than developing open virtio drivers. Limited vendor support for standardized virtio interfaces restricts Mosaic's deployment on some closed-source AI workloads.
+\noindent\textbf{Scope and limitations.} Mosaic requires a para-virtualized frontend--backend interface. VirtIO is widely used for standard datacenter I/O~\cite{virtio}, but proprietary accelerators may not expose an equivalent open backend interface~\cite{nvidia, google, ascend}. Our prototype forwards the generic VirtIO element path, but the evaluation exercises block storage only; validating network and accelerator devices remains future work. In addition, the current prototype treats a connection failure as a device-path failure. A production deployment would need control-plane support for admission, authentication, reconnection, and coordinated teardown, as well as scheduler policies that decide when the recovered capacity justifies remote-access cost. Finally, our controlled loopback setup isolates software and RTT effects, but does not capture interference on a shared datacenter network.
 
-\noindent\textbf{Conclusion.} In this paper, we present Mosaic, a reactive solution to stranded resources. It transparently stitches stranded resources across multiple hosts into an allocatable resource set through the para-virtualization layer. A scheduling wrapper relaxes the indivisibility constraint of cluster schedulers, and a runtime system forwards device I/O across hosts without modifying guest or host operating systems. Evaluations show that Mosaic retains 95\% of the local random-read throughput, converges with kernel remote-storage protocols under network RTT, and slows a TPCC macro-benchmark by 16--44\% depending on concurrency, while remaining the fastest remote protocol at low concurrency. The remaining loss concentrates at high concurrency, where the inflight window caps outstanding requests; improving this behavior, e.g., by integrating kernel-level data-plane acceleration, is left as future work.
+\noindent\textbf{Conclusion.} Mosaic makes otherwise stranded resources allocatable by composing them at the virtualization layer. It splits a VirtIO device across a local QEMU and a remote backend while leaving guest drivers, host drivers, and device backend logic unchanged. In our storage prototype, worker-pool concurrency recovers 95\% and 98\% of local random-read and random-write throughput, an inflight window tracks the expected window/RTT limit up to 2\,ms, and buffer reuse reduces large-request latency. Mosaic is 16--44\% slower than local KVM on TPC-C and 8--16\% slower on the I/O-intensive ALS and XGBoost workloads. The results show that virtualization provides a practical stitching point between scheduler-only mitigation and hardware-assisted disaggregation, while also making explicit the concurrency and data-movement costs of remote resources.
 
 \newpage
 
