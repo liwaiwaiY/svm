@@ -2,6 +2,9 @@
 
 # start minimized local_qemu
 # ssh: 0.0.0.0 with port 2222 on host to vm port 22
+# REMOTE_IP: direct-link address of the machine running the remote stub
+
+REMOTE_IP="${REMOTE_IP:-127.0.0.1}"
 
 qemu-system-x86_64 \
 -enable-kvm -cpu host -smp 4 -m 4096 \
@@ -10,7 +13,7 @@ qemu-system-x86_64 \
 -netdev user,id=net0,hostfwd=tcp::2222-:22 \
 -device virtio-net-pci,netdev=net0 \
 -drive file=~/svm/exp/local/svm/dummy.raw,if=none,id=drive1,format=raw \
--device virtio-blk-pci,drive=drive1,serial=data-disk,remote-machine=127.0.0.1@5552 \
+-device virtio-blk-pci,drive=drive1,serial=data-disk,remote-machine="${REMOTE_IP}@5552" \
 -serial file:guest.log \
 -monitor none \
 -display none \

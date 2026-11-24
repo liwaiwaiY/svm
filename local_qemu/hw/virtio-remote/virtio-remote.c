@@ -515,13 +515,14 @@ static void vr_config_init(void)
          * coroutine backend, so it is a reliable dump trigger on the stub. */
         signal(SIGUSR2, vr_ev_dump_handler);
     }
-    /* defaults (same as the pre-config behavior) */
-    vr_zc_send_min   = 4 * 1024;
+    /* defaults: the fixed tier used by the real-world app runs
+     * (W=4 I=256 B=16 Z=1M P=off) */
+    vr_zc_send_min   = 1024 * 1024;
     vr_workers       = 4;
-    vr_inflight_size = 0;
-    vr_local_batch_n = 4;
+    vr_inflight_size = 256;
+    vr_local_batch_n = 16;
     vr_local_batch_m = 64 * 1024;
-    vr_stub_batch_n  = 4;
+    vr_stub_batch_n  = 16;
     vr_stub_batch_m  = 64 * 1024;
     vr_stub_queue_max = 0; /* 0 = unlimited (current behavior) */
     vr_stub_merge_m   = 0; /* 0 = per-sg in buffers (original behavior) */

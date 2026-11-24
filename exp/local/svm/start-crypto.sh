@@ -2,6 +2,9 @@
 
 # start minimized local_qemu
 # ssh: 0.0.0.0 with port 2222 on host to vm port 22
+# REMOTE_IP: direct-link address of the machine running the remote stub
+
+REMOTE_IP="${REMOTE_IP:-127.0.0.1}"
 
 qemu-system-x86_64 \
 -enable-kvm -cpu host -smp 4 -m 4096 \
@@ -10,7 +13,7 @@ qemu-system-x86_64 \
 -netdev user,id=net0,hostfwd=tcp::2222-:22 \
 -device virtio-net-pci,netdev=net0 \
 -object cryptodev-backend-builtin,id=cryptodev0 \
--device virtio-crypto-pci,cryptodev=cryptodev0,remote-machine=127.0.0.1@5553 \
+-device virtio-crypto-pci,cryptodev=cryptodev0,remote-machine="${REMOTE_IP}@5553" \
 -serial file:guest.log \
 -monitor none \
 -display none \
