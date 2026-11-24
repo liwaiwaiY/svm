@@ -1564,8 +1564,8 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_distributor, NULL, NULL,
-                                   local_retry_send, vq);
+                                   local_response_distributor, local_retry_send,
+                                   NULL, NULL, vq);
             }
             return false;
         }
@@ -1593,8 +1593,8 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_distributor, NULL, NULL,
-                                   local_retry_send, vq);
+                                   local_response_distributor, local_retry_send,
+                                   NULL, NULL, vq);
             }
             return false;
         }
@@ -1642,8 +1642,8 @@ static bool local_send_msg(VirtQueue *vq, VirtQueueElement *elem)
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_distributor, NULL, NULL,
-                                   local_retry_send, vq);
+                                   local_response_distributor, local_retry_send,
+                                   NULL, NULL, vq);
             }
             return false;
         }
@@ -1850,8 +1850,8 @@ static bool local_send_resume(VirtQueue *vq)
                 AioContext *ctx_aio = vq_get_aio_ctx(vq);
                 if (ctx_aio) {
                     aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                       local_response_distributor, NULL, NULL,
-                                       local_retry_send, vq);
+                                       local_response_distributor, local_retry_send,
+                                       NULL, NULL, vq);
                 }
                 return false;
             }
@@ -1873,8 +1873,8 @@ static bool local_send_resume(VirtQueue *vq)
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_distributor, NULL, NULL,
-                                   local_retry_send, vq);
+                                   local_response_distributor, local_retry_send,
+                                   NULL, NULL, vq);
             }
             return false;
         }
@@ -2145,8 +2145,8 @@ static bool local_send_batch(VirtQueue *vq, VirtQueueElement **elems,
             AioContext *ctx_aio = vq_get_aio_ctx(vq);
             if (ctx_aio) {
                 aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                                   local_response_distributor, NULL, NULL,
-                                   local_retry_send, vq);
+                                   local_response_distributor, local_retry_send,
+                                   NULL, NULL, vq);
             }
             goto out_free;
         }
@@ -2208,8 +2208,8 @@ static bool local_send_batch(VirtQueue *vq, VirtQueueElement **elems,
         AioContext *ctx_aio = vq_get_aio_ctx(vq);
         if (ctx_aio) {
             aio_set_fd_handler(ctx_aio, ctx->resp_fd,
-                               local_response_distributor, NULL, NULL,
-                               local_retry_send, vq);
+                               local_response_distributor, local_retry_send,
+                               NULL, NULL, vq);
         }
         /* release the scratch buffers of the fully-queued elems only; the
          * kept ones were moved to the resume state */
